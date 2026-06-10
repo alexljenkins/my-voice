@@ -2,7 +2,8 @@
 //!
 //! English-only Moonshine ONNX, MIT. Streams each file to `{name}.part` and
 //! renames on completion so a Ctrl-C mid-download never leaves a truncated file
-//! masquerading as complete. We never auto-download — only this explicit path.
+//! masquerading as complete. Called by `--download` and auto-triggered when the
+//! model directory is absent.
 
 use std::fs;
 use std::io::{Read, Write};

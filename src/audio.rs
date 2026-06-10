@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat};
-use sonora::config::{GainController2, AdaptiveDigital, HighPassFilter, NoiseSuppression};
+use sonora::config::{AdaptiveDigital, GainController2, NoiseSuppression, NoiseSuppressionLevel};
 use sonora::{AudioProcessing, Config, StreamConfig};
 use tracing::{debug, error, info};
 
@@ -102,14 +102,20 @@ impl AudioRecorder {
     pub fn stop(&mut self) -> Vec<f32> {
         self.stream = None; // drop → stop the stream
         let raw = std::mem::take(&mut *self.buffer.lock().unwrap());
+        let raw_peak = raw.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
         debug!(
-            "captured {} samples at {} Hz ({:.2}s)",
+            "captured {} samples at {} Hz ({:.2}s), raw peak {raw_peak:.3}",
             raw.len(),
             self.sample_rate,
             raw.len() as f32 / self.sample_rate as f32
         );
-        let processed = apply_audio_processing(&raw, self.sample_rate);
-        resample(&processed, self.sample_rate, TARGET_RATE)
+        // Resample to 16 kHz *first*, then run the WebRTC APM at 16 kHz. The APM
+        // only supports 8/16/32/48 kHz; feeding it the device's native rate (e.g.
+        // 44.1 kHz) produces pitch-shifted, noisy garbage.
+        let resampled = resample(&raw, self.sample_rate, TARGET_RATE);
+        let mut processed = apply_audio_processing(&resampled, TARGET_RATE);
+        normalize_peak(&mut processed);
+        processed
     }
 
     pub fn target_rate(&self) -> u32 {
@@ -153,6 +159,27 @@ where
     }
 }
 
+/// Loudest sample lands here after normalization — leaves ~0.5 dB headroom so
+/// nothing clips on the 16-bit wav write / model input.
+const NORM_TARGET_PEAK: f32 = 0.95;
+/// Cap upward gain so a near-silent capture doesn't amplify the noise floor.
+const NORM_MAX_GAIN: f32 = 8.0;
+
+/// Peak-normalize in place: scale the whole buffer so its loudest sample sits at
+/// `NORM_TARGET_PEAK`. Pulls APM overshoot (>1.0) back under the clip ceiling and
+/// lifts quiet captures to a consistent level. Upward gain is capped.
+pub fn normalize_peak(samples: &mut [f32]) {
+    let peak = samples.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
+    if peak <= 0.0 {
+        return;
+    }
+    let gain = (NORM_TARGET_PEAK / peak).min(NORM_MAX_GAIN);
+    debug!("normalize: peak {peak:.3} → gain {gain:.2}");
+    for s in samples.iter_mut() {
+        *s *= gain;
+    }
+}
+
 /// Linear-interpolation resample. [voxtype — verbatim algorithm]
 pub fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     if from_rate == to_rate || samples.is_empty() {
@@ -185,21 +212,27 @@ pub fn apply_audio_processing(samples: &[f32], sample_rate: u32) -> Vec<f32> {
     }
 
     let cfg = Config {
-        high_pass_filter: Some(HighPassFilter::default()),
-        noise_suppression: Some(NoiseSuppression::default()),
+        noise_suppression: Some(NoiseSuppression {
+            level: NoiseSuppressionLevel::Moderate,
+            ..Default::default()
+        }),
         gain_controller2: Some(GainController2 {
-            adaptive_digital: Some(AdaptiveDigital::default()),
+            adaptive_digital: Some(AdaptiveDigital {
+                headroom_db: 3.0,   // target -3 dBFS
+                max_gain_db: 5.0,   // cap boost at 5 dB
+                ..Default::default()
+            }),
             ..Default::default()
         }),
         ..Default::default()
     };
     let stream_cfg = StreamConfig::new(sample_rate, 1);
+    let frame_size = stream_cfg.num_frames(); // samples per 10ms
     let mut apm = AudioProcessing::builder()
         .config(cfg)
         .capture_config(stream_cfg)
+        .render_config(StreamConfig::new(sample_rate, 1))
         .build();
-
-    let frame_size = stream_cfg.num_frames(); // samples per 10ms
     let mut out = Vec::with_capacity(samples.len());
 
     for chunk in samples.chunks(frame_size) {

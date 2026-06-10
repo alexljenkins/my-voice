@@ -36,6 +36,10 @@ struct Cli {
     #[arg(long)]
     test: bool,
 
+    /// Transcribe a wav file directly (bypasses the mic), print, exit.
+    #[arg(long, value_name = "PATH")]
+    wav: Option<PathBuf>,
+
     /// Print audio input device names and exit.
     #[arg(long)]
     list_devices: bool,
@@ -75,7 +79,45 @@ fn run(cli: Cli) -> Result<()> {
         return run_test(&config);
     }
 
+    if let Some(path) = cli.wav.as_deref() {
+        return run_wav(&config, path);
+    }
+
     run_daemon(&config)
+}
+
+/// Feed a wav file straight through the transcriber — isolates the inference
+/// path from the mic/capture path. Resamples to 16 kHz mono if needed.
+fn run_wav(config: &Config, path: &std::path::Path) -> Result<()> {
+    let mut reader = hound::WavReader::open(path).with_context(|| format!("opening {path:?}"))?;
+    let spec = reader.spec();
+    let ch = spec.channels.max(1) as usize;
+    let interleaved: Vec<f32> = match spec.sample_format {
+        hound::SampleFormat::Float => reader.samples::<f32>().filter_map(|s| s.ok()).collect(),
+        hound::SampleFormat::Int => {
+            let max = (1i64 << (spec.bits_per_sample - 1)) as f32;
+            reader
+                .samples::<i32>()
+                .filter_map(|s| s.ok())
+                .map(|s| s as f32 / max)
+                .collect()
+        }
+    };
+    let mono: Vec<f32> = interleaved
+        .chunks(ch)
+        .map(|f| f.iter().sum::<f32>() / ch as f32)
+        .collect();
+    let samples = audio::resample(&mono, spec.sample_rate, 16_000);
+    let peak = samples.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
+    info!(
+        "wav: {:.2}s, {} Hz → 16 kHz, {ch} ch → mono, peak {peak:.3}",
+        mono.len() as f32 / spec.sample_rate as f32,
+        spec.sample_rate
+    );
+    let mut transcriber = transcriber::create(config)?;
+    let text = post_process(&transcriber.transcribe(&samples)?);
+    println!("{text}");
+    Ok(())
 }
 
 /// Record a fixed 3s window, dump a debug wav, transcribe, and print — verifies

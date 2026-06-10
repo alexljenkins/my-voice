@@ -19,7 +19,13 @@ pub trait Transcriber: Send {
 pub fn create(config: &Config) -> Result<Box<dyn Transcriber>> {
     let resolved = config.resolve_model();
     match resolved.backend {
-        Backend::Moonshine => Ok(Box::new(moonshine::Moonshine::load(&resolved.path, config)?)),
+        Backend::Moonshine => {
+            if !resolved.path.exists() {
+                eprintln!("model not found — downloading {}...", config.model);
+                crate::download::run(config)?;
+            }
+            Ok(Box::new(moonshine::Moonshine::load(&resolved.path, config)?))
+        }
         #[cfg(feature = "whisper")]
         Backend::Whisper => Ok(Box::new(whisper::WhisperTranscriber::load(
             &resolved.path,

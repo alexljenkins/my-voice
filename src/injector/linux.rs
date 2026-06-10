@@ -1,17 +1,16 @@
 //! Linux text injection: session-aware chain with runtime demotion.
 //!
-//! Wayland: wtype → ydotool → clipboard (wl-copy)
-//! X11:     xdotool → clipboard (xclip)
-//! Neither: clipboard (fails if no display)
+//! Wayland: wtype → ydotool → clipboard (arboard)
+//! X11:     xdotool → clipboard (arboard)
+//! Neither: clipboard (arboard; may fail without a display server)
 //!
-//! All external tools are spawned via Command argv/stdin — never through a shell,
+//! All external tools are spawned via Command argv — never through a shell,
 //! since transcribed text can contain quotes, `$`, backticks, anything.
 
-use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use tracing::{info, warn};
 
 use super::Injector;
@@ -68,7 +67,10 @@ fn find_ydotool_socket() -> Option<PathBuf> {
 }
 
 fn run_argv(cmd: &str, args: &[&str]) -> Result<()> {
-    let status = Command::new(cmd).args(args).status()?;
+    let status = Command::new(cmd)
+        .args(args)
+        .status()
+        .with_context(|| format!("{cmd} not found on PATH"))?;
     if status.success() {
         Ok(())
     } else {
@@ -76,18 +78,6 @@ fn run_argv(cmd: &str, args: &[&str]) -> Result<()> {
     }
 }
 
-fn run_stdin(cmd: &str, args: &[&str], text: &str) -> Result<()> {
-    let mut child = Command::new(cmd).args(args).stdin(Stdio::piped()).spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(text.as_bytes())?;
-    }
-    let status = child.wait()?;
-    if status.success() {
-        Ok(())
-    } else {
-        bail!("{cmd} exited with {status}")
-    }
-}
 
 // --- individual tool injectors ---
 
@@ -132,38 +122,18 @@ impl Injector for XdotoolInjector {
     }
 }
 
-struct WlCopyInjector;
-impl Injector for WlCopyInjector {
+struct ArboardInjector;
+impl Injector for ArboardInjector {
     fn inject(&mut self, text: &str) -> Result<()> {
-        run_stdin("wl-copy", &[], text)
+        arboard::Clipboard::new()
+            .and_then(|mut cb| cb.set_text(text))
+            .map_err(|e| anyhow::anyhow!("clipboard: {e}"))
     }
     fn name(&self) -> &'static str {
-        "wl-copy"
+        "clipboard"
     }
 }
 
-struct XclipInjector;
-impl Injector for XclipInjector {
-    fn inject(&mut self, text: &str) -> Result<()> {
-        run_stdin("xclip", &["-selection", "clipboard"], text)
-    }
-    fn name(&self) -> &'static str {
-        "xclip"
-    }
-}
-
-struct NoSessionInjector;
-impl Injector for NoSessionInjector {
-    fn inject(&mut self, _text: &str) -> Result<()> {
-        bail!(
-            "no display server detected (WAYLAND_DISPLAY and DISPLAY are both unset); \
-             cannot inject text"
-        )
-    }
-    fn name(&self) -> &'static str {
-        "none"
-    }
-}
 
 // --- chain injector ---
 
@@ -225,11 +195,10 @@ pub fn detect(config: &Config) -> Box<dyn Injector> {
     };
 
     if chain.is_empty() {
-        if session == Session::None {
-            info!("injection: clipboard only (no display server detected)");
-        } else {
-            info!("injection: clipboard only (no typing tool found on {session_name})");
-        }
+        warn!(
+            "injection: no typing tool on {session_name} — \
+             falling back to clipboard; paste with Ctrl+V"
+        );
     } else {
         info!("injection: {} ({session_name})", chain[0].name());
     }
@@ -237,12 +206,12 @@ pub fn detect(config: &Config) -> Box<dyn Injector> {
     Box::new(ChainInjector {
         chain,
         cursor: 0,
-        clipboard: build_clipboard(session),
+        clipboard: build_clipboard(),
     })
 }
 
 pub fn clipboard_injector() -> Box<dyn Injector> {
-    build_clipboard(detect_session())
+    build_clipboard()
 }
 
 fn build_auto_chain(session: Session) -> Vec<Box<dyn Injector>> {
@@ -306,10 +275,6 @@ fn build_specific_chain(injection: &str, session: Session) -> Vec<Box<dyn Inject
     }
 }
 
-fn build_clipboard(session: Session) -> Box<dyn Injector> {
-    match session {
-        Session::Wayland => Box::new(WlCopyInjector),
-        Session::X11 => Box::new(XclipInjector),
-        Session::None => Box::new(NoSessionInjector),
-    }
+fn build_clipboard() -> Box<dyn Injector> {
+    Box::new(ArboardInjector)
 }

@@ -28,7 +28,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            model: "moonshine-tiny".into(),
+            model: "moonshine-base".into(),
             model_dir: "~/.local/share/my-voice/models".into(),
             quantized: true,
             threads: 0,
@@ -189,7 +189,7 @@ mod tests {
         let cfg = Config::default();
         let toml = toml::to_string(&cfg).unwrap();
         let back: Config = toml::from_str(&toml).unwrap();
-        assert_eq!(back.model, "moonshine-tiny");
+        assert_eq!(back.model, "moonshine-base");
         assert_eq!(back.min_speech_ms, 300);
         assert_eq!(back.trailing_silence_ms, 150);
         assert!(back.quantized);
@@ -199,7 +199,7 @@ mod tests {
     fn partial_config_keeps_defaults() {
         let cfg: Config = toml::from_str("min_speech_ms = 500").unwrap();
         assert_eq!(cfg.min_speech_ms, 500);
-        assert_eq!(cfg.model, "moonshine-tiny"); // default preserved
+        assert_eq!(cfg.model, "moonshine-base"); // default preserved
     }
 
     #[test]
@@ -207,7 +207,7 @@ mod tests {
         let cfg = Config::default();
         let r = cfg.resolve_model();
         assert_eq!(r.backend, Backend::Moonshine);
-        assert!(r.path.ends_with("moonshine-tiny"));
+        assert!(r.path.ends_with("moonshine-base"));
     }
 
     #[test]
