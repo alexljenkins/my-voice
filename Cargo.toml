@@ -1,0 +1,49 @@
+[package]
+name = "my-voice"
+version = "0.1.0"
+edition = "2021"
+description = "Hold-to-talk local voice typing. English. Fast. Lean."
+license = "MIT"
+
+[dependencies]
+# Audio
+cpal = "0.15"
+hound = "3.5"            # debug wav dumps + --test mode only
+
+# CLI + config
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+dirs = "5"
+
+# Model download (wired in Phase 2; declared now to keep the dep set stable)
+ureq = "2"
+
+# Util
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+num_cpus = "1.16"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.12"           # kernel-level hotkey + uinput passthrough
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.24"
+core-foundation = "0.10"
+libc = "0.2"             # flock single-instance + signal handler
+
+[features]
+default = []
+whisper = []             # dep:whisper-rs wired in Phase 3
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = 3
+
+[profile.dev]
+opt-level = 1            # debug-mode inference is unusably slow otherwise
