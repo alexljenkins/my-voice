@@ -1,8 +1,13 @@
 //! Linux text injection: session-aware chain with runtime demotion.
 //!
-//! Wayland: wtype → ydotool → clipboard (arboard)
-//! X11:     xdotool → clipboard (arboard)
+//! Wayland: wtype → AT-SPI → ydotool → clipboard (arboard)
+//! X11:     xdotool → AT-SPI → clipboard (arboard)
 //! Neither: clipboard (arboard; may fail without a display server)
+//!
+//! AT-SPI (GNOME's accessibility bus) slots in ahead of ydotool everywhere:
+//! it's enabled by default on Ubuntu GNOME and needs no install or elevated
+//! permissions. On GNOME Wayland `wtype` fails at runtime (Mutter blocks the
+//! virtual-keyboard protocol) and demotes to AT-SPI automatically.
 //!
 //! All external tools are spawned via Command argv — never through a shell,
 //! since transcribed text can contain quotes, `$`, backticks, anything.
@@ -11,10 +16,62 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::Injector;
 use crate::config::Config;
+
+/// `KeySynthType::KEY_SYM` — generate a key event for a given X keysym.
+const KEY_SYM: u32 = 3;
+
+/// Map a Unicode scalar to an X keysym. Latin-1 codepoints map directly; the
+/// rest use the Unicode-to-keysym convention (`0x01000000 + codepoint`).
+fn char_to_keysym(c: char) -> i32 {
+    let cp = c as u32;
+    let ks = if cp <= 0xff { cp } else { 0x0100_0000 + cp };
+    ks as i32
+}
+
+/// AT-SPI2 D-Bus plumbing. Two proxies: `org.a11y.Bus` on the session bus to
+/// discover the accessibility bus address, then `DeviceEventController` on that
+/// bus to synthesize keystrokes (the same mechanism Orca uses).
+mod atspi {
+    #[zbus::proxy(
+        interface = "org.a11y.Bus",
+        default_service = "org.a11y.Bus",
+        default_path = "/org/a11y/bus"
+    )]
+    pub trait A11yBus {
+        fn get_address(&self) -> zbus::Result<String>;
+    }
+
+    #[zbus::proxy(
+        interface = "org.a11y.atspi.DeviceEventController",
+        default_service = "org.a11y.atspi.Registry",
+        default_path = "/org/a11y/atspi/registry/deviceeventcontroller"
+    )]
+    pub trait DeviceEventController {
+        fn generate_keyboard_event(
+            &self,
+            keycode: i32,
+            keystring: &str,
+            synth_type: u32,
+        ) -> zbus::Result<()>;
+    }
+
+    /// Connect to the session bus, resolve the a11y bus address, and return a
+    /// blocking proxy to its DeviceEventController.
+    pub fn connect() -> zbus::Result<DeviceEventControllerProxyBlocking<'static>> {
+        let session = zbus::blocking::Connection::session()?;
+        let addr = A11yBusProxyBlocking::new(&session)?.get_address()?;
+        let a11y = zbus::blocking::connection::Builder::address(addr.as_str())?.build()?;
+        // Disable property caching: the interface's `version` property doesn't
+        // serve GetAll reliably, and we only ever call a method.
+        DeviceEventControllerProxyBlocking::builder(&a11y)
+            .cache_properties(zbus::proxy::CacheProperties::No)
+            .build()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Session {
@@ -121,6 +178,37 @@ impl Injector for XdotoolInjector {
     }
 }
 
+/// Injects via the AT-SPI accessibility bus, one keysym event per character.
+/// Zero-setup and lower-privilege than the external typing tools.
+struct AtSpiInjector {
+    dec: atspi::DeviceEventControllerProxyBlocking<'static>,
+}
+impl Injector for AtSpiInjector {
+    fn inject(&mut self, text: &str) -> Result<()> {
+        for c in text.chars() {
+            self.dec
+                .generate_keyboard_event(char_to_keysym(c), "", KEY_SYM)
+                .map_err(|e| anyhow::anyhow!("atspi generate_keyboard_event: {e}"))?;
+        }
+        Ok(())
+    }
+    fn name(&self) -> &'static str {
+        "atspi"
+    }
+}
+
+/// Probe AT-SPI at startup. Returns None (logged at debug) when the a11y bus is
+/// unavailable or disabled, so it's simply skipped in the chain.
+fn try_atspi() -> Option<Box<dyn Injector>> {
+    match atspi::connect() {
+        Ok(dec) => Some(Box::new(AtSpiInjector { dec })),
+        Err(e) => {
+            debug!("atspi unavailable ({e}); skipping in injection chain");
+            None
+        }
+    }
+}
+
 struct ArboardInjector;
 impl Injector for ArboardInjector {
     fn inject(&mut self, text: &str) -> Result<()> {
@@ -219,6 +307,9 @@ fn build_auto_chain(session: Session) -> Vec<Box<dyn Injector>> {
             if binary_on_path("wtype") {
                 chain.push(Box::new(WtypeInjector));
             }
+            if let Some(inj) = try_atspi() {
+                chain.push(inj);
+            }
             if binary_on_path("ydotool") {
                 if let Some(socket) = find_ydotool_socket() {
                     chain.push(Box::new(YdotoolInjector { socket }));
@@ -228,6 +319,9 @@ fn build_auto_chain(session: Session) -> Vec<Box<dyn Injector>> {
         Session::X11 => {
             if binary_on_path("xdotool") {
                 chain.push(Box::new(XdotoolInjector));
+            }
+            if let Some(inj) = try_atspi() {
+                chain.push(inj);
             }
         }
         Session::None => {}
@@ -250,6 +344,14 @@ fn build_specific_chain(injection: &str, session: Session) -> Vec<Box<dyn Inject
                 vec![Box::new(XdotoolInjector)]
             } else {
                 warn!("injection=xdotool but xdotool not found; falling back to auto");
+                build_auto_chain(session)
+            }
+        }
+        "atspi" => {
+            if let Some(inj) = try_atspi() {
+                vec![inj]
+            } else {
+                warn!("injection=atspi but AT-SPI unavailable; falling back to auto");
                 build_auto_chain(session)
             }
         }

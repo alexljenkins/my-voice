@@ -8,7 +8,7 @@ Push and hold **CapsLock**, speak, release — text appears in the focused windo
 
 1. Hotkey held → mic opens.
 2. Release → trailing 150ms captured, audio pre-processed (HPF + noise suppression + AGC via WebRTC APM), transcribed by [Moonshine](https://github.com/usefulsensors/moonshine) tiny quantized (~50 MB, ~10× real-time on CPU).
-3. Text injected into the focused window via `wtype` / `ydotool` / `xdotool` (Linux) or CGEvent unicode injection (macOS). Hold **Shift+CapsLock** to copy to clipboard instead.
+3. Text injected into the focused window via AT-SPI / `wtype` / `ydotool` / `xdotool` (Linux) or CGEvent unicode injection (macOS). Hold **Shift+CapsLock** to copy to clipboard instead.
 
 ## Requirements
 
@@ -82,7 +82,7 @@ my-voice --config PATH   # use an alternate config file
 my-voice -v / -vv        # info / debug logging (RUST_LOG also respected)
 ```
 
-**Shift+CapsLock** copies to clipboard instead of typing — useful in terminals and apps where direct injection is unreliable (e.g. GNOME Wayland without ydotool).
+**Shift+CapsLock** copies to clipboard instead of typing — useful in terminals and apps where direct injection is unreliable.
 
 ## Configuration
 
@@ -100,7 +100,7 @@ grab = true                # Linux: exclusive grab + uinput passthrough
 audio_device = ""          # substring match against device name; "" = system default
 min_speech_ms = 300        # discard holds shorter than this (accidental taps)
 trailing_silence_ms = 150  # extra silence captured after release (catches last word tail)
-injection = "auto"         # auto | wtype | xdotool | ydotool | clipboard
+injection = "auto"         # auto | wtype | xdotool | ydotool | atspi | clipboard
 ```
 
 Unknown config keys warn and are ignored.
@@ -135,7 +135,9 @@ Requires `cmake` and a C++ toolchain at build time only.
 ## Troubleshooting
 
 **GNOME Wayland — text doesn't appear:**
-`wtype` fails on GNOME (compositor lacks the virtual-keyboard protocol). The daemon automatically falls back to the next method. Install `ydotool` for universal injection:
+`wtype` fails on GNOME (compositor lacks the virtual-keyboard protocol). The daemon automatically falls back to **AT-SPI**, GNOME's accessibility bus, which is enabled by default and needs no setup or elevated permissions — so on a stock Ubuntu GNOME install injection should just work.
+
+If AT-SPI is disabled or a particular app ignores it, install `ydotool` for universal injection:
 
 ```sh
 sudo apt install ydotool

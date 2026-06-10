@@ -42,6 +42,7 @@ sonora = "0.1.0"
 evdev = "0.12"           # kernel-level hotkey + uinput passthrough
 libc = "0.2"
 arboard = "3"
+zbus = "5"               # pure-Rust D-Bus (blocking API) for AT-SPI injection
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.24"
