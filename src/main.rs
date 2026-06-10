@@ -4,6 +4,7 @@ mod download;
 mod hotkey;
 mod injector;
 mod model_cache;
+mod notify;
 mod text;
 mod transcriber;
 mod ui;
@@ -59,7 +60,8 @@ struct Cli {
 
 fn main() {
     let cli = Cli::parse();
-    init_tracing(cli.verbose);
+    let is_daemon = !cli.download && !cli.test && cli.wav.is_none() && !cli.list_devices;
+    let _log_guard = init_tracing(cli.verbose, is_daemon);
 
     if let Err(e) = run(cli) {
         eprintln!("error: {e:#}");
@@ -143,20 +145,43 @@ fn run_test(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// A message into the daemon's single event loop. Both the hotkey listener and
-/// the tray UI feed this one channel, so the loop can react to input and to
-/// menu actions without a multi-channel select.
+/// A message into the daemon's single event loop. Hotkey listener, tray UI,
+/// and background download all feed this one channel.
 enum DaemonMsg {
     Hotkey(HotkeyEvent),
     Ui(UiCommand),
+    DownloadProgress(u8),
+    DownloadComplete,
+    DownloadFailed(String),
 }
 
 fn run_daemon(mut config: Config, config_path: Option<PathBuf>) -> Result<()> {
-    let _lock = single_instance::acquire().context("single-instance lock")?;
+    let _lock = match single_instance::acquire() {
+        Ok(l) => l,
+        Err(e) => {
+            notify::send(
+                "Already running",
+                "my-voice is already running. Find it in the menu bar.",
+            );
+            return Err(e);
+        }
+    };
+
+    notify::init();
 
     let mut cache = ModelCache::new(&config);
     cache.start_evict_thread();
-    let mut recorder = AudioRecorder::new(&config.audio_device)?;
+    let mut recorder = match AudioRecorder::new(&config.audio_device) {
+        Ok(r) => r,
+        Err(e) => {
+            notify::once(
+                notify::ErrorKind::NoMicrophone,
+                "No microphone found",
+                "my-voice can't find a microphone. Check that one is plugged in.",
+            );
+            return Err(e.context("no microphone"));
+        }
+    };
     let mut typer = injector::detect(&config);
     let mut clipper = injector::clipboard();
 
@@ -171,16 +196,48 @@ fn run_daemon(mut config: Config, config_path: Option<PathBuf>) -> Result<()> {
     let (daemon_tx, daemon_rx) = mpsc::channel::<DaemonMsg>();
 
     let (hk_tx, hk_rx) = mpsc::channel::<HotkeyEvent>();
-    spawn_listener(&config, hk_tx)?;
+    if let Err(e) = spawn_listener(&config, hk_tx) {
+        #[cfg(target_os = "linux")]
+        notify::once(
+            notify::ErrorKind::HotkeySetupNeeded,
+            "Hotkey setup needed",
+            "Your desktop doesn't support automatic hotkey registration. \
+             Run in Terminal: sudo usermod -aG input $USER — then log out and back in.",
+        );
+        return Err(e.context("hotkey listener failed"));
+    }
     forward(hk_rx, daemon_tx.clone(), DaemonMsg::Hotkey);
 
     let (ui_tx, ui_rx) = mpsc::channel::<UiCommand>();
     let ui = ui::spawn(ui_tx);
-    forward(ui_rx, daemon_tx, DaemonMsg::Ui);
+    forward(ui_rx, daemon_tx.clone(), DaemonMsg::Ui);
 
     info!("ready — hold '{}' to record", config.hotkey);
     ui.set_state(TrayState::Ready);
     ui.set_menu(build_tray_menu(&config, &audio_devices));
+
+    // First-run: if the model files aren't present, start a background download
+    // immediately. Hotkey presses during download will surface a transcription
+    // error — the tray Downloading state makes the reason obvious.
+    if !config.is_model_downloaded() {
+        info!("model not found — starting background download");
+        notify::once(
+            notify::ErrorKind::ModelMissing,
+            "Speech model not found",
+            "Downloading the speech model now (~70 MB). my-voice will be ready in a moment.",
+        );
+        let tx = daemon_tx.clone();
+        download::start_background(config.clone(), move |event| {
+            use download::DownloadEvent::*;
+            let msg = match event {
+                Progress(pct) => DaemonMsg::DownloadProgress(pct),
+                Complete => DaemonMsg::DownloadComplete,
+                Failed(e) => DaemonMsg::DownloadFailed(e),
+            };
+            let _ = tx.send(msg);
+        });
+        ui.set_state(TrayState::Downloading { pct: 0 });
+    }
 
     let mut trailing = Duration::from_millis(config.trailing_silence_ms);
     let mut state = State::Idle;
@@ -242,6 +299,27 @@ fn run_daemon(mut config: Config, config_path: Option<PathBuf>) -> Result<()> {
                 // Recording+Press (autorepeat dupe) and Idle+Release (stale): ignore.
                 _ => {}
             },
+            DaemonMsg::DownloadProgress(pct) => {
+                ui.set_state(TrayState::Downloading { pct });
+            }
+            DaemonMsg::DownloadComplete => {
+                info!("model download complete");
+                ui.set_state(TrayState::Ready);
+                ui.set_menu(build_tray_menu(&config, &audio_devices));
+                notify::send("Model ready", "Speech model downloaded. my-voice is ready to use.");
+            }
+            DaemonMsg::DownloadFailed(e) => {
+                warn!("model download failed: {e}");
+                ui.set_state(TrayState::Error(
+                    "Download failed — check internet connection".into(),
+                ));
+                notify::once(
+                    notify::ErrorKind::ModelDownloadFailed,
+                    "Download failed",
+                    "Couldn't download the speech model. Check your internet connection \
+                     and try again from the my-voice menu.",
+                );
+            }
             DaemonMsg::Ui(UiCommand::Quit) => {
                 info!("quit requested");
                 break;
@@ -394,6 +472,12 @@ fn apply_reload(
         let c = ModelCache::new(&new);
         c.start_evict_thread();
         *cache = c;
+        let label = match new.model.as_str() {
+            "moonshine-base" => "Switched to moonshine-base. Accuracy improved.".to_string(),
+            "moonshine-tiny" => "Switched to moonshine-tiny. Speed improved.".to_string(),
+            other => format!("Switched to {other}."),
+        };
+        notify::send("Model ready", &label);
     }
     *trailing = Duration::from_millis(new.trailing_silence_ms);
     *config = new;
@@ -417,11 +501,19 @@ fn build_tray_menu(config: &Config, audio_devices: &[String]) -> TrayMenuState {
     ];
     let models = known
         .iter()
-        .map(|&(name, label)| ModelItem {
-            name: name.to_string(),
-            label: label.to_string(),
-            active: config.model == name,
-            downloaded: model_dir.join(name).is_dir(),
+        .map(|&(name, label)| {
+            let dir = model_dir.join(name);
+            // Mirror is_model_downloaded(): check for the encoder file, not just
+            // the dir, so the menu stays "not downloaded" while the download runs.
+            let downloaded = dir.is_dir()
+                && (dir.join("encoder_model_quantized.onnx").exists()
+                    || dir.join("encoder_model.onnx").exists());
+            ModelItem {
+                name: name.to_string(),
+                label: label.to_string(),
+                active: config.model == name,
+                downloaded,
+            }
         })
         .collect();
 
@@ -493,6 +585,12 @@ fn handle_utterance(
             }
             if let Err(e) = injector.inject(&text) {
                 warn!("injection failed: {e:#}");
+                notify::once(
+                    notify::ErrorKind::InjectionFailed,
+                    "Text not appearing?",
+                    "my-voice couldn't type into the active app. Try switching to \
+                     clipboard mode in the my-voice menu, then paste with Ctrl+V.",
+                );
                 return Err("Text didn't appear in the active app".into());
             }
             Ok(())
@@ -522,20 +620,58 @@ fn write_wav(samples: &[f32], rate: u32, path: &str) -> Result<()> {
     Ok(())
 }
 
-fn init_tracing(verbose: u8) {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        let level = match verbose {
-            0 => "warn",
-            1 => "info",
-            _ => "debug",
-        };
-        EnvFilter::new(format!("my_voice={level}"))
-    });
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .with_writer(std::io::stderr)
-        .init();
+fn init_tracing(
+    verbose: u8,
+    daemon: bool,
+) -> Option<tracing_appender::non_blocking::WorkerGuard> {
+    let make_filter = || {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            let level = match verbose {
+                0 => "warn",
+                1 => "info",
+                _ => "debug",
+            };
+            EnvFilter::new(format!("my_voice={level}"))
+        })
+    };
+
+    if daemon {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        use tracing_subscriber::util::SubscriberInitExt as _;
+        use tracing_subscriber::Layer as _;
+
+        let log_dir = dirs::state_dir()
+            .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".local/state"))
+            .join("my-voice");
+        let _ = std::fs::create_dir_all(&log_dir);
+        let file_appender = tracing_appender::rolling::never(&log_dir, "my-voice.log");
+        let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
+
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_target(false)
+                    .with_writer(std::io::stderr)
+                    .with_filter(make_filter()),
+            )
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_target(false)
+                    .with_ansi(false)
+                    .with_writer(file_writer)
+                    .with_filter(make_filter()),
+            )
+            .init();
+
+        Some(guard)
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(make_filter())
+            .with_target(false)
+            .with_writer(std::io::stderr)
+            .init();
+        None
+    }
 }
 
 /// On any clean exit (SIGINT, SIGTERM) restore platform state and let the OS

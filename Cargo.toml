@@ -35,6 +35,7 @@ anyhow = "1"
 thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 num_cpus = "1.16"
 sonora = "0.1.0"
 
@@ -48,6 +49,8 @@ zbus = "5"               # pure-Rust D-Bus (blocking API) for AT-SPI injection
 ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
 # pure-Rust X11 protocol impl for XGrabKey hotkey backend (no C xcb/x11 libs).
 x11rb = { version = "0.13", default-features = false }
+# pure-Rust D-Bus desktop notifications (z feature = zbus backend, no C libdbus).
+notify-rust = { version = "4", default-features = false, features = ["z"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.24"

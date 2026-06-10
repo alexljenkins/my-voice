@@ -339,9 +339,20 @@ fn status_label(state: &TrayState) -> String {
 /// Handle for pushing state into the tray. `NoOp` when no tray host is present
 /// (headless / no session bus / GNOME without the AppIndicator extension) — the
 /// daemon still runs (§6.4).
+///
+/// Cloneable: `Handle<T>` wraps an `Arc` so cloning is cheap and safe.
 pub enum LinuxUiHandle {
     Live(Handle<MyVoiceTray>),
     NoOp,
+}
+
+impl Clone for LinuxUiHandle {
+    fn clone(&self) -> Self {
+        match self {
+            LinuxUiHandle::Live(h) => LinuxUiHandle::Live(h.clone()),
+            LinuxUiHandle::NoOp => LinuxUiHandle::NoOp,
+        }
+    }
 }
 
 impl LinuxUiHandle {

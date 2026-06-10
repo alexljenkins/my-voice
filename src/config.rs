@@ -155,11 +155,20 @@ impl Config {
         Ok(())
     }
 
-    /// True if the model directory for the configured model exists on disk.
-    #[allow(dead_code)]
+    /// True if the model files for the configured model are present on disk.
+    /// Checks for the encoder file specifically — the download creates the
+    /// directory before files land, so a dir-only check would race.
     pub fn is_model_downloaded(&self) -> bool {
         let dir = self.resolved_model_dir().join(&self.model);
-        dir.exists() && dir.is_dir()
+        if !dir.is_dir() {
+            return false;
+        }
+        let encoder = if self.quantized {
+            "encoder_model_quantized.onnx"
+        } else {
+            "encoder_model.onnx"
+        };
+        dir.join(encoder).exists()
     }
 
     /// Map `model` → backend + concrete path. Does not check existence.

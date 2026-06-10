@@ -21,7 +21,6 @@ pub enum TrayState {
     /// Released, inference running.
     Transcribing,
     /// Model download in progress.
-    #[allow(dead_code)]
     Downloading { pct: u8 },
     /// Something needs attention; the string is the user-facing reason.
     Error(String),
@@ -83,13 +82,24 @@ mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 
-/// A live handle the daemon uses to push state into the tray. One handle lives
-/// in the daemon loop.
+/// A live handle the daemon uses to push state into the tray. Cloneable so
+/// background threads (e.g. auto-download) can push state independently.
 pub struct UiHandle {
     #[cfg(target_os = "linux")]
     inner: linux::LinuxUiHandle,
     #[cfg(not(target_os = "linux"))]
     _priv: (),
+}
+
+impl Clone for UiHandle {
+    fn clone(&self) -> Self {
+        Self {
+            #[cfg(target_os = "linux")]
+            inner: self.inner.clone(),
+            #[cfg(not(target_os = "linux"))]
+            _priv: (),
+        }
+    }
 }
 
 impl UiHandle {

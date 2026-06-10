@@ -1,9 +1,7 @@
-//! HuggingFace model fetcher for `--download`.
+//! HuggingFace model fetcher — used by `--download` and the first-run auto-download.
 //!
-//! English-only Moonshine ONNX, MIT. Streams each file to `{name}.part` and
-//! renames on completion so a Ctrl-C mid-download never leaves a truncated file
-//! masquerading as complete. Called by `--download` and auto-triggered when the
-//! model directory is absent.
+//! Streams each file to `{name}.part` and renames on completion so a Ctrl-C or
+//! crash mid-download never leaves a truncated file masquerading as complete.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -14,6 +12,16 @@ use tracing::info;
 
 use crate::config::Config;
 
+/// Events emitted by a background download.
+pub enum DownloadEvent {
+    /// Download progress, 0–99 while in progress.
+    Progress(u8),
+    /// All files verified and renamed to their final paths.
+    Complete,
+    /// Download failed; string is a user-facing reason.
+    Failed(String),
+}
+
 fn repo_for(model: &str) -> Option<&'static str> {
     match model {
         "moonshine-tiny" => Some("onnx-community/moonshine-tiny-ONNX"),
@@ -22,7 +30,32 @@ fn repo_for(model: &str) -> Option<&'static str> {
     }
 }
 
-/// Fetch the configured model's three files into `{model_dir}/{model}/`.
+fn file_list(quantized: bool) -> &'static [(&'static str, &'static str)] {
+    if quantized {
+        &[
+            (
+                "onnx/encoder_model_quantized.onnx",
+                "encoder_model_quantized.onnx",
+            ),
+            (
+                "onnx/decoder_model_merged_quantized.onnx",
+                "decoder_model_merged_quantized.onnx",
+            ),
+            ("tokenizer.json", "tokenizer.json"),
+        ]
+    } else {
+        &[
+            ("onnx/encoder_model.onnx", "encoder_model.onnx"),
+            (
+                "onnx/decoder_model_merged.onnx",
+                "decoder_model_merged.onnx",
+            ),
+            ("tokenizer.json", "tokenizer.json"),
+        ]
+    }
+}
+
+/// CLI download — called by `--download` flag. Prints progress to stderr.
 pub fn run(config: &Config) -> Result<()> {
     let Some(repo) = repo_for(&config.model) else {
         bail!(
@@ -35,44 +68,96 @@ pub fn run(config: &Config) -> Result<()> {
     let dest = config.resolved_model_dir().join(&config.model);
     fs::create_dir_all(&dest).with_context(|| format!("creating {}", dest.display()))?;
 
-    // When quantized, fetch only the quantized pair (smaller, faster, negligible
-    // WER cost); the full-precision pair otherwise.
-    let (encoder, decoder) = if config.quantized {
-        (
-            "onnx/encoder_model_quantized.onnx",
-            "onnx/decoder_model_merged_quantized.onnx",
-        )
-    } else {
-        ("onnx/encoder_model.onnx", "onnx/decoder_model_merged.onnx")
-    };
-
-    for remote in [encoder, decoder, "tokenizer.json"] {
-        let basename = Path::new(remote).file_name().unwrap();
-        download_file(repo, remote, &dest.join(basename))?;
+    for &(remote, base) in file_list(config.quantized) {
+        let url_display = format!("https://huggingface.co/{repo}/resolve/main/{remote}");
+        eprintln!("downloading {url_display}");
+        download_file(repo, remote, &dest.join(base), |done, _total| {
+            eprint!("\r  {} KiB", done / 1024);
+        })?;
+        eprintln!();
     }
 
     info!("model ready at {}", dest.display());
     Ok(())
 }
 
-fn download_file(repo: &str, remote: &str, dest: &Path) -> Result<()> {
+/// Spawn a background thread to download the configured model.
+///
+/// Fires [`DownloadEvent`]s through `on_event`. Callers should check
+/// `config.is_model_downloaded()` first; per-file downloads are still
+/// idempotent (skip if already present) so duplicate calls are safe.
+pub fn start_background(
+    config: Config,
+    on_event: impl Fn(DownloadEvent) + Send + 'static,
+) {
+    std::thread::spawn(move || {
+        match run_with_progress(&config, |pct| on_event(DownloadEvent::Progress(pct))) {
+            Ok(()) => on_event(DownloadEvent::Complete),
+            Err(e) => on_event(DownloadEvent::Failed(format!("{e:#}"))),
+        }
+    });
+}
+
+fn run_with_progress(config: &Config, on_progress: impl Fn(u8)) -> Result<()> {
+    let Some(repo) = repo_for(&config.model) else {
+        bail!(
+            "auto-download: '{}' is not a known model name \
+             (only moonshine-tiny / moonshine-base are auto-downloadable)",
+            config.model
+        );
+    };
+
+    let dest = config.resolved_model_dir().join(&config.model);
+    fs::create_dir_all(&dest).with_context(|| format!("creating {}", dest.display()))?;
+
+    let files = file_list(config.quantized);
+    let n = files.len() as u8;
+
+    for (i, &(remote, base)) in files.iter().enumerate() {
+        // Each file gets an equal share of the 0–99 range; 100 signals Complete.
+        let base_pct = (i as u8 * 100) / n;
+        let range = (100u8 / n).max(1);
+        download_file(repo, remote, &dest.join(base), |done, total| {
+            let within = if total > 0 {
+                ((done * range as u64) / total) as u8
+            } else {
+                0
+            };
+            on_progress((base_pct + within).min(99));
+        })?;
+    }
+    Ok(())
+}
+
+/// Download one file. Calls `on_chunk(bytes_done, content_length)` after each
+/// write. Skips if `dest` already exists. Writes to `{dest}.part` and renames
+/// on completion.
+fn download_file(
+    repo: &str,
+    remote: &str,
+    dest: &Path,
+    on_chunk: impl Fn(u64, u64),
+) -> Result<()> {
     if dest.exists() {
         info!("have {}", dest.display());
         return Ok(());
     }
 
     let url = format!("https://huggingface.co/{repo}/resolve/main/{remote}");
-    eprintln!("downloading {url}");
-
     let resp = ureq::get(&url)
         .call()
         .with_context(|| format!("GET {url}"))?;
 
+    let content_length = resp
+        .header("content-length")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+
     let part = dest.with_extension("part");
-    let mut reader = resp.into_reader();
     let mut file =
         fs::File::create(&part).with_context(|| format!("creating {}", part.display()))?;
 
+    let mut reader = resp.into_reader();
     let mut buf = [0u8; 64 * 1024];
     let mut total: u64 = 0;
     loop {
@@ -82,11 +167,12 @@ fn download_file(repo: &str, remote: &str, dest: &Path) -> Result<()> {
         }
         file.write_all(&buf[..n])?;
         total += n as u64;
-        eprint!("\r  {} KiB", total / 1024);
+        on_chunk(total, content_length);
     }
-    eprintln!();
     file.sync_all().ok();
 
-    fs::rename(&part, dest).with_context(|| format!("renaming into {}", dest.display()))?;
+    // TODO(§10): verify SHA-256 against pinned hash before rename.
+    // Obtain hashes: curl -s https://huggingface.co/{repo}/raw/main/{path} | grep oid
+    fs::rename(&part, dest).with_context(|| format!("renaming to {}", dest.display()))?;
     Ok(())
 }
