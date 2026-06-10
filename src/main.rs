@@ -1,12 +1,8 @@
-//! my-voice — hold-to-talk local voice typing.
-//!
-//! Phase 2: daemon records while the hotkey is held, then transcribes with
-//! Moonshine and prints the text. No injection yet.
-
 mod audio;
 mod config;
 mod download;
 mod hotkey;
+mod injector;
 mod text;
 mod transcriber;
 
@@ -23,6 +19,7 @@ use tracing_subscriber::EnvFilter;
 use audio::AudioRecorder;
 use config::Config;
 use hotkey::{spawn_listener, HotkeyEvent};
+use injector::Injector;
 use text::post_process;
 use transcriber::Transcriber;
 
@@ -105,6 +102,8 @@ fn run_daemon(config: &Config) -> Result<()> {
 
     let mut transcriber = transcriber::create(config)?;
     let mut recorder = AudioRecorder::new(&config.audio_device)?;
+    let mut typer = injector::detect(config);
+    let mut clipper = injector::clipboard();
 
     #[cfg(target_os = "macos")]
     install_signal_handlers();
@@ -125,13 +124,18 @@ fn run_daemon(config: &Config) -> Result<()> {
                     continue;
                 }
                 debug!(clipboard_only, "recording");
-                state = State::Recording;
+                state = State::Recording { clipboard_only };
             }
-            (State::Recording, HotkeyEvent::Release) => {
+            (State::Recording { clipboard_only }, HotkeyEvent::Release) => {
                 // PTT trailing buffer: catch the tail of the last word.
                 thread::sleep(trailing);
                 let samples = recorder.stop();
-                handle_utterance(transcriber.as_mut(), &samples, recorder.target_rate(), config);
+                let inj: &mut dyn Injector = if *clipboard_only {
+                    clipper.as_mut()
+                } else {
+                    typer.as_mut()
+                };
+                handle_utterance(transcriber.as_mut(), &samples, recorder.target_rate(), config, inj);
                 state = State::Idle;
             }
             // Recording+Press (autorepeat dupe) and Idle+Release (stale): ignore.
@@ -146,12 +150,18 @@ fn run_daemon(config: &Config) -> Result<()> {
 #[derive(Debug)]
 enum State {
     Idle,
-    Recording,
+    Recording { clipboard_only: bool },
 }
 
-/// Gate, transcribe, post-process, print. Both gates discard before inference —
+/// Gate, transcribe, post-process, inject. Both gates discard before inference —
 /// ASR models hallucinate text on silence, so never feed them empty air.
-fn handle_utterance(transcriber: &mut dyn Transcriber, samples: &[f32], rate: u32, config: &Config) {
+fn handle_utterance(
+    transcriber: &mut dyn Transcriber,
+    samples: &[f32],
+    rate: u32,
+    config: &Config,
+    injector: &mut dyn Injector,
+) {
     let ms = samples.len() as f32 / rate as f32 * 1000.0;
     if ms < config.min_speech_ms as f32 {
         debug!("discarded: {ms:.0}ms < min_speech_ms {}", config.min_speech_ms);
@@ -170,7 +180,9 @@ fn handle_utterance(transcriber: &mut dyn Transcriber, samples: &[f32], rate: u3
                 debug!("empty transcription");
                 return;
             }
-            println!("{text}");
+            if let Err(e) = injector.inject(&text) {
+                warn!("injection failed: {e:#}");
+            }
         }
         Err(e) => warn!("transcription failed: {e:#}"),
     }
