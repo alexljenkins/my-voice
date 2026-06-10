@@ -140,11 +140,15 @@ impl Moonshine {
     }
 }
 
+fn compute_max_tokens(audio_len: usize) -> usize {
+    let duration = audio_len as f32 / SAMPLE_RATE;
+    ((duration * MAX_TOKENS_PER_SECOND) as usize).clamp(16, ABSOLUTE_MAX_TOKENS)
+}
+
 impl Transcriber for Moonshine {
     fn transcribe(&mut self, audio: &[f32]) -> Result<String> {
         let duration = audio.len() as f32 / SAMPLE_RATE;
-        let max_tokens =
-            ((duration * MAX_TOKENS_PER_SECOND) as usize).clamp(16, ABSOLUTE_MAX_TOKENS);
+        let max_tokens = compute_max_tokens(audio.len());
 
         // --- Encode: raw waveform [1, len] → hidden states, kept for every step.
         let t_enc = Instant::now();
@@ -185,7 +189,9 @@ impl Transcriber for Moonshine {
             };
             inputs.push((
                 Cow::Borrowed("input_ids"),
-                Tensor::<i64>::from_array(([1usize, ids.len()], ids)).ort()?.into(),
+                Tensor::<i64>::from_array(([1usize, ids.len()], ids))
+                    .ort()?
+                    .into(),
             ));
             inputs.push((
                 Cow::Borrowed("encoder_hidden_states"),
@@ -218,7 +224,9 @@ impl Transcriber for Moonshine {
 
             inputs.push((
                 Cow::Borrowed("use_cache_branch"),
-                Tensor::<bool>::from_array(([1usize], vec![step > 0])).ort()?.into(),
+                Tensor::<bool>::from_array(([1usize], vec![step > 0]))
+                    .ort()?
+                    .into(),
             ));
 
             let outputs = self.decoder.run(inputs).ort()?;
@@ -312,4 +320,29 @@ fn argmax(v: &[f32]) -> i64 {
         }
     }
     best as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn max_tokens_floor() {
+        // Even a single sample must produce at least 16 tokens.
+        assert_eq!(compute_max_tokens(1), 16);
+        assert_eq!(compute_max_tokens(0), 16);
+    }
+
+    #[test]
+    fn max_tokens_normal() {
+        // 10s at 16 kHz → 10 * 8 = 80 tokens.
+        assert_eq!(compute_max_tokens(16_000 * 10), 80);
+    }
+
+    #[test]
+    fn max_tokens_ceiling() {
+        // Very long audio must be clamped to 512.
+        assert_eq!(compute_max_tokens(16_000 * 100), ABSOLUTE_MAX_TOKENS);
+        assert_eq!(compute_max_tokens(usize::MAX / 4), ABSOLUTE_MAX_TOKENS);
+    }
 }

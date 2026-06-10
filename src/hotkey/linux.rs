@@ -205,8 +205,9 @@ pub fn resolve_key(name: &str) -> Result<Key> {
         "LEFTSHIFT" | "LSHIFT" => Key::KEY_LEFTSHIFT,
         "RIGHTMETA" | "RMETA" | "RIGHTSUPER" => Key::KEY_RIGHTMETA,
         "LEFTMETA" | "LMETA" | "LEFTSUPER" | "SUPER" => Key::KEY_LEFTMETA,
-        other => resolve_fkey(other)
-            .ok_or_else(|| anyhow!("unrecognized hotkey name '{name}' (try CapsLock, F12, RightCtrl)"))?,
+        other => resolve_fkey(other).ok_or_else(|| {
+            anyhow!("unrecognized hotkey name '{name}' (try CapsLock, F12, RightCtrl)")
+        })?,
     };
     Ok(key)
 }

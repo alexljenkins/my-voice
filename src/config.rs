@@ -212,8 +212,10 @@ mod tests {
 
     #[test]
     fn model_resolution_gguf() {
-        let mut cfg = Config::default();
-        cfg.model = "/models/ggml-base.en.gguf".into();
+        let cfg = Config {
+            model: "/models/ggml-base.en.gguf".into(),
+            ..Default::default()
+        };
         let r = cfg.resolve_model();
         assert_eq!(r.backend, Backend::Whisper);
         assert_eq!(r.path, PathBuf::from("/models/ggml-base.en.gguf"));
@@ -221,8 +223,10 @@ mod tests {
 
     #[test]
     fn model_resolution_dir_is_moonshine() {
-        let mut cfg = Config::default();
-        cfg.model = "/models/custom-moonshine".into();
+        let cfg = Config {
+            model: "/models/custom-moonshine".into(),
+            ..Default::default()
+        };
         assert_eq!(cfg.resolve_model().backend, Backend::Moonshine);
     }
 

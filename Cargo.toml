@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Hold-to-talk local voice typing. English. Fast. Lean."
 license = "MIT"
+repository = "https://github.com/alexljenkins/my-voice"
 
 [dependencies]
 # Audio

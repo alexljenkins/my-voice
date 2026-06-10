@@ -152,7 +152,7 @@ fn run_daemon(config: &Config) -> Result<()> {
     let mut typer = injector::detect(config);
     let mut clipper = injector::clipboard();
 
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     install_signal_handlers();
 
     let (tx, rx) = mpsc::channel::<HotkeyEvent>();
@@ -219,7 +219,10 @@ fn handle_utterance(
 ) {
     let ms = samples.len() as f32 / rate as f32 * 1000.0;
     if ms < config.min_speech_ms as f32 {
-        debug!("discarded: {ms:.0}ms < min_speech_ms {}", config.min_speech_ms);
+        debug!(
+            "discarded: {ms:.0}ms < min_speech_ms {}",
+            config.min_speech_ms
+        );
         return;
     }
     let peak = samples.iter().fold(0.0f32, |a, b| a.max(b.abs()));
@@ -277,15 +280,17 @@ fn init_tracing(verbose: u8) {
         .init();
 }
 
-#[cfg(target_os = "macos")]
+/// On any clean exit (SIGINT, SIGTERM) restore platform state and let the OS
+/// close file descriptors, which releases evdev grabs and the flock.
+#[cfg(unix)]
 fn install_signal_handlers() {
     extern "C" fn handler(_sig: libc::c_int) {
-        hotkey::restore_platform();
+        hotkey::restore_platform(); // restores hidutil on macOS; no-op on Linux
         std::process::exit(0);
     }
     unsafe {
-        libc::signal(libc::SIGINT, handler as usize);
-        libc::signal(libc::SIGTERM, handler as usize);
+        libc::signal(libc::SIGTERM, handler as *const () as usize);
+        libc::signal(libc::SIGINT, handler as *const () as usize);
     }
 }
 

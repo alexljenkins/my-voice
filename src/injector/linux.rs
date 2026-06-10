@@ -24,9 +24,9 @@ enum Session {
 }
 
 fn detect_session() -> Session {
-    if std::env::var("WAYLAND_DISPLAY").map_or(false, |v| !v.is_empty()) {
+    if std::env::var("WAYLAND_DISPLAY").is_ok_and(|v| !v.is_empty()) {
         Session::Wayland
-    } else if std::env::var("DISPLAY").map_or(false, |v| !v.is_empty()) {
+    } else if std::env::var("DISPLAY").is_ok_and(|v| !v.is_empty()) {
         Session::X11
     } else {
         Session::None
@@ -77,7 +77,6 @@ fn run_argv(cmd: &str, args: &[&str]) -> Result<()> {
         bail!("{cmd} exited with {status}")
     }
 }
-
 
 // --- individual tool injectors ---
 
@@ -133,7 +132,6 @@ impl Injector for ArboardInjector {
         "clipboard"
     }
 }
-
 
 // --- chain injector ---
 
@@ -277,4 +275,39 @@ fn build_specific_chain(injection: &str, session: Session) -> Vec<Box<dyn Inject
 
 fn build_clipboard() -> Box<dyn Injector> {
     Box::new(ArboardInjector)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binary_probe_absent() {
+        assert!(!binary_on_path("__my_voice_nonexistent_binary_xyz__"));
+    }
+
+    #[test]
+    fn binary_probe_present() {
+        // `ls` is on PATH everywhere.
+        assert!(binary_on_path("ls"));
+    }
+
+    #[test]
+    fn detect_session_no_panic() {
+        // Just verify it returns without panicking regardless of env state.
+        let _ = detect_session();
+    }
+
+    #[test]
+    fn chain_empty_when_no_session_and_no_tools() {
+        // Session::None produces an empty chain (no X11/Wayland tools to probe).
+        let chain = build_auto_chain(Session::None);
+        assert!(chain.is_empty());
+    }
+
+    #[test]
+    fn clipboard_injector_name() {
+        let inj = build_clipboard();
+        assert_eq!(inj.name(), "clipboard");
+    }
 }

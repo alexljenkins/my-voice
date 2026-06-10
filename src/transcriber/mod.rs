@@ -24,7 +24,10 @@ pub fn create(config: &Config) -> Result<Box<dyn Transcriber>> {
                 eprintln!("model not found — downloading {}...", config.model);
                 crate::download::run(config)?;
             }
-            Ok(Box::new(moonshine::Moonshine::load(&resolved.path, config)?))
+            Ok(Box::new(moonshine::Moonshine::load(
+                &resolved.path,
+                config,
+            )?))
         }
         #[cfg(feature = "whisper")]
         Backend::Whisper => Ok(Box::new(whisper::WhisperTranscriber::load(

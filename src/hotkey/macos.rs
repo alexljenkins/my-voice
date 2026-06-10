@@ -14,8 +14,7 @@ use std::thread;
 use anyhow::{anyhow, Result};
 use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
 use core_graphics::event::{
-    CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
-    EventField,
+    CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType, EventField,
 };
 use core_graphics::event_source::CGEventFlags;
 use tracing::{error, info, warn};
@@ -26,8 +25,7 @@ use crate::config::Config;
 /// Virtual keycode for F18 (the remap destination).
 const KEYCODE_F18: i64 = 79;
 
-const REMAP_TO_F18: &str =
-    r#"{"UserKeyMapping":[{"HIDKeyboardModifierMappingSrc":0x700000039,"HIDKeyboardModifierMappingDst":0x70000006D}]}"#;
+const REMAP_TO_F18: &str = r#"{"UserKeyMapping":[{"HIDKeyboardModifierMappingSrc":0x700000039,"HIDKeyboardModifierMappingDst":0x70000006D}]}"#;
 const REMAP_CLEAR: &str = r#"{"UserKeyMapping":[]}"#;
 
 pub fn spawn(config: &Config, tx: Sender<HotkeyEvent>) -> Result<()> {
@@ -95,11 +93,8 @@ fn run_tap(clipboard_hotkey: bool, tx: Sender<HotkeyEvent>) {
                 return Some(event.to_owned()); // pass everything else through
             }
 
-            let autorepeat =
-                event.get_integer_value_field(EventField::KEYBOARD_EVENT_AUTOREPEAT);
-            let shift = event
-                .get_flags()
-                .contains(CGEventFlags::CGEventFlagShift);
+            let autorepeat = event.get_integer_value_field(EventField::KEYBOARD_EVENT_AUTOREPEAT);
+            let shift = event.get_flags().contains(CGEventFlags::CGEventFlagShift);
 
             match event_type {
                 CGEventType::KeyDown if autorepeat == 0 => {
@@ -118,11 +113,14 @@ fn run_tap(clipboard_hotkey: bool, tx: Sender<HotkeyEvent>) {
     let tap = match tap {
         Ok(t) => t,
         Err(()) => {
-            error!(
-                "could not create event tap. Grant Input Monitoring and Accessibility \
-                 to this binary: System Settings → Privacy & Security."
+            eprintln!(
+                "error: could not create event tap.\n\
+                 Grant these permissions to the terminal (or binary) in:\n\
+                   System Settings → Privacy & Security → Input Monitoring\n\
+                   System Settings → Privacy & Security → Accessibility\n\
+                 Then restart my-voice."
             );
-            return;
+            std::process::exit(1);
         }
     };
 

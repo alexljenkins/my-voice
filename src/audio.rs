@@ -39,9 +39,7 @@ impl AudioRecorder {
         let sample_format = supported.sample_format();
         let channels = supported.channels() as usize;
         let sample_rate = supported.sample_rate().0;
-        info!(
-            "audio device: {name} ({sample_rate} Hz, {channels} ch, {sample_format:?})"
-        );
+        info!("audio device: {name} ({sample_rate} Hz, {channels} ch, {sample_format:?})");
 
         // Pre-allocate ~60s of mono audio at the device rate.
         let cap = sample_rate as usize * MAX_SECONDS;
@@ -218,8 +216,8 @@ pub fn apply_audio_processing(samples: &[f32], sample_rate: u32) -> Vec<f32> {
         }),
         gain_controller2: Some(GainController2 {
             adaptive_digital: Some(AdaptiveDigital {
-                headroom_db: 3.0,   // target -3 dBFS
-                max_gain_db: 5.0,   // cap boost at 5 dB
+                headroom_db: 3.0, // target -3 dBFS
+                max_gain_db: 5.0, // cap boost at 5 dB
                 ..Default::default()
             }),
             ..Default::default()
