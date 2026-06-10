@@ -1611,6 +1611,7 @@ dependencies = [
  "tracing-subscriber",
  "ureq 2.12.1",
  "whisper-rs",
+ "x11rb",
  "zbus",
 ]
 

@@ -46,6 +46,8 @@ zbus = "5"               # pure-Rust D-Bus (blocking API) for AT-SPI injection
 # pure-Rust StatusNotifierItem tray over zbus (no GTK, no libdbus). async-io
 # matches zbus's default backend (no second runtime); blocking API for the sync daemon.
 ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
+# pure-Rust X11 protocol impl for XGrabKey hotkey backend (no C xcb/x11 libs).
+x11rb = { version = "0.13", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.24"
