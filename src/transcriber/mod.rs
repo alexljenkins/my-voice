@@ -1,6 +1,8 @@
 //! Transcriber trait + backend factory.
 
 mod moonshine;
+#[cfg(feature = "whisper")]
+mod whisper;
 
 use anyhow::{bail, Result};
 
@@ -18,6 +20,12 @@ pub fn create(config: &Config) -> Result<Box<dyn Transcriber>> {
     let resolved = config.resolve_model();
     match resolved.backend {
         Backend::Moonshine => Ok(Box::new(moonshine::Moonshine::load(&resolved.path, config)?)),
+        #[cfg(feature = "whisper")]
+        Backend::Whisper => Ok(Box::new(whisper::WhisperTranscriber::load(
+            &resolved.path,
+            config,
+        )?)),
+        #[cfg(not(feature = "whisper"))]
         Backend::Whisper => bail!(
             "this binary was built without whisper support; rebuild with \
              --features whisper, or use a Moonshine model"

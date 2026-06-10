@@ -23,6 +23,9 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 dirs = "5"
 
+# whisper.cpp backend — opt-in; compiles C++ via cmake.
+whisper-rs = { version = "0.16", optional = true }
+
 # Model download (wired in Phase 2; declared now to keep the dep set stable)
 ureq = "2"
 
@@ -44,7 +47,7 @@ libc = "0.2"             # flock single-instance + signal handler
 
 [features]
 default = []
-whisper = []             # dep:whisper-rs wired in Phase 3
+whisper = ["dep:whisper-rs"]
 
 [profile.release]
 lto = true
