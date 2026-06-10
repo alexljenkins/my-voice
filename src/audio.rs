@@ -267,6 +267,14 @@ pub fn list_devices() -> Result<()> {
     Ok(())
 }
 
+/// Return names of all available input devices. Empty on enumeration failure.
+pub fn input_device_names() -> Vec<String> {
+    let host = cpal::default_host();
+    host.input_devices()
+        .map(|devices| devices.filter_map(|d| d.name().ok()).collect())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{apply_audio_processing, resample};

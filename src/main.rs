@@ -25,7 +25,7 @@ use hotkey::{spawn_listener, HotkeyEvent};
 use injector::Injector;
 use model_cache::ModelCache;
 use text::post_process;
-use ui::{TrayState, UiCommand, UiHandle};
+use ui::{ModelItem, TrayMenuState, TrayState, UiCommand, UiHandle};
 
 const TEST_WAV: &str = "/tmp/my-voice-test.wav";
 
@@ -154,13 +154,14 @@ enum DaemonMsg {
 fn run_daemon(mut config: Config, config_path: Option<PathBuf>) -> Result<()> {
     let _lock = single_instance::acquire().context("single-instance lock")?;
 
-    // Lazy load: the daemon starts cold and holds no model in RAM until the
-    // first press. The evict thread reclaims it after idle.
     let mut cache = ModelCache::new(&config);
     cache.start_evict_thread();
     let mut recorder = AudioRecorder::new(&config.audio_device)?;
     let mut typer = injector::detect(&config);
     let mut clipper = injector::clipboard();
+
+    // Enumerate input devices once at startup for the tray mic submenu.
+    let audio_devices = audio::input_device_names();
 
     #[cfg(unix)]
     install_signal_handlers();
@@ -179,6 +180,7 @@ fn run_daemon(mut config: Config, config_path: Option<PathBuf>) -> Result<()> {
 
     info!("ready — hold '{}' to record", config.hotkey);
     ui.set_state(TrayState::Ready);
+    ui.set_menu(build_tray_menu(&config, &audio_devices));
 
     let mut trailing = Duration::from_millis(config.trailing_silence_ms);
     let mut state = State::Idle;
@@ -233,6 +235,7 @@ fn run_daemon(mut config: Config, config_path: Option<PathBuf>) -> Result<()> {
                             &mut cache,
                             &mut trailing,
                             &ui,
+                            &audio_devices,
                         );
                     }
                 }
@@ -252,10 +255,56 @@ fn run_daemon(mut config: Config, config_path: Option<PathBuf>) -> Result<()> {
                     &mut cache,
                     &mut trailing,
                     &ui,
+                    &audio_devices,
                 ),
-                // Mid-utterance: defer to the Release handler above.
                 State::Recording { .. } => pending_reload = true,
             },
+
+            // Settings changes that require a self-restart (hotkey/grab backend
+            // threads can't be torn down live). Write to disk before restarting
+            // so the fresh process picks up the new value.
+            DaemonMsg::Ui(UiCommand::SetHotkey(hk)) => {
+                let mut updated = config.clone();
+                updated.hotkey = hk;
+                save_config(&updated, config_path.as_deref());
+                hotkey::restore_platform();
+                restart_self();
+            }
+            DaemonMsg::Ui(UiCommand::SetGrab(g)) => {
+                let mut updated = config.clone();
+                updated.grab = g;
+                save_config(&updated, config_path.as_deref());
+                hotkey::restore_platform();
+                restart_self();
+            }
+
+            // Settings changes that apply live (no restart needed). Write the
+            // new value to disk so apply_reload detects the diff; defer if
+            // mid-utterance, apply immediately otherwise.
+            DaemonMsg::Ui(cmd @ (UiCommand::SetModel(_) | UiCommand::SetAudioDevice(_) | UiCommand::SetInjection(_) | UiCommand::SetClipboardHotkey(_))) => {
+                let mut updated = config.clone();
+                match cmd {
+                    UiCommand::SetModel(m) => updated.model = m,
+                    UiCommand::SetAudioDevice(d) => updated.audio_device = d,
+                    UiCommand::SetInjection(inj) => updated.injection = inj,
+                    UiCommand::SetClipboardHotkey(b) => updated.clipboard_hotkey = b,
+                    _ => unreachable!(),
+                }
+                save_config(&updated, config_path.as_deref());
+                match state {
+                    State::Idle => apply_reload(
+                        &mut config,
+                        config_path.as_deref(),
+                        &mut recorder,
+                        &mut typer,
+                        &mut cache,
+                        &mut trailing,
+                        &ui,
+                        &audio_devices,
+                    ),
+                    State::Recording { .. } => pending_reload = true,
+                }
+            }
         }
     }
 
@@ -315,6 +364,7 @@ fn apply_reload(
     cache: &mut Arc<ModelCache>,
     trailing: &mut Duration,
     ui: &UiHandle,
+    audio_devices: &[String],
 ) {
     let new = match Config::load(config_path) {
         Ok(c) => c,
@@ -348,6 +398,42 @@ fn apply_reload(
     *trailing = Duration::from_millis(new.trailing_silence_ms);
     *config = new;
     ui.set_state(TrayState::Ready);
+    ui.set_menu(build_tray_menu(config, audio_devices));
+}
+
+/// Persist config to disk; logs a warning on failure (non-fatal for the daemon).
+fn save_config(config: &Config, path: Option<&Path>) {
+    if let Err(e) = config.save(path) {
+        warn!("failed to save config: {e:#}");
+    }
+}
+
+/// Build the tray menu state from the current config and available devices.
+fn build_tray_menu(config: &Config, audio_devices: &[String]) -> TrayMenuState {
+    let model_dir = config.resolved_model_dir();
+    let known: &[(&str, &str)] = &[
+        ("moonshine-tiny", "Faster  •  moonshine-tiny"),
+        ("moonshine-base", "Accurate  •  moonshine-base"),
+    ];
+    let models = known
+        .iter()
+        .map(|&(name, label)| ModelItem {
+            name: name.to_string(),
+            label: label.to_string(),
+            active: config.model == name,
+            downloaded: model_dir.join(name).is_dir(),
+        })
+        .collect();
+
+    TrayMenuState {
+        models,
+        audio_devices: audio_devices.to_vec(),
+        active_device: config.audio_device.clone(),
+        hotkey: config.hotkey.clone(),
+        injection: config.injection.clone(),
+        grab: config.grab,
+        clipboard_hotkey: config.clipboard_hotkey,
+    }
 }
 
 /// Re-exec the current binary in place. The single-instance flock is CLOEXEC,

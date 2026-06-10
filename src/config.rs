@@ -137,6 +137,31 @@ impl Config {
         expand_tilde(&self.model_dir)
     }
 
+    /// Write the current config to disk. Creates parent directories as needed.
+    /// Uses `path` if given, otherwise the default location.
+    pub fn save(&self, path: Option<&Path>) -> Result<()> {
+        let p = match path {
+            Some(p) => p.to_path_buf(),
+            None => Self::default_path()
+                .ok_or_else(|| anyhow::anyhow!("cannot determine config path"))?,
+        };
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating config dir {}", parent.display()))?;
+        }
+        let toml = toml::to_string_pretty(self).context("serializing config")?;
+        std::fs::write(&p, &toml)
+            .with_context(|| format!("writing config {}", p.display()))?;
+        Ok(())
+    }
+
+    /// True if the model directory for the configured model exists on disk.
+    #[allow(dead_code)]
+    pub fn is_model_downloaded(&self) -> bool {
+        let dir = self.resolved_model_dir().join(&self.model);
+        dir.exists() && dir.is_dir()
+    }
+
     /// Map `model` → backend + concrete path. Does not check existence.
     #[allow(dead_code)]
     pub fn resolve_model(&self) -> ModelResolution {
