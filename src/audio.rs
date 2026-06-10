@@ -9,6 +9,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat};
+use sonora::config::{GainController2, AdaptiveDigital, HighPassFilter, NoiseSuppression};
+use sonora::{AudioProcessing, Config, StreamConfig};
 use tracing::{debug, error, info};
 
 const TARGET_RATE: u32 = 16_000;
@@ -106,7 +108,8 @@ impl AudioRecorder {
             self.sample_rate,
             raw.len() as f32 / self.sample_rate as f32
         );
-        resample(&raw, self.sample_rate, TARGET_RATE)
+        let processed = apply_audio_processing(&raw, self.sample_rate);
+        resample(&processed, self.sample_rate, TARGET_RATE)
     }
 
     pub fn target_rate(&self) -> u32 {
@@ -171,6 +174,52 @@ pub fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     out
 }
 
+/// Run WebRTC audio processing (HPF + NS + AGC2) on mono PCM at `sample_rate`.
+///
+/// Processes in 10ms frames. Batch post-processing — no latency added during recording.
+/// Returns a new buffer of equal length; if the input isn't a multiple of the frame size
+/// the tail samples pass through unprocessed (they're silence from the trailing gap).
+pub fn apply_audio_processing(samples: &[f32], sample_rate: u32) -> Vec<f32> {
+    if samples.is_empty() {
+        return Vec::new();
+    }
+
+    let cfg = Config {
+        high_pass_filter: Some(HighPassFilter::default()),
+        noise_suppression: Some(NoiseSuppression::default()),
+        gain_controller2: Some(GainController2 {
+            adaptive_digital: Some(AdaptiveDigital::default()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let stream_cfg = StreamConfig::new(sample_rate, 1);
+    let mut apm = AudioProcessing::builder()
+        .config(cfg)
+        .capture_config(stream_cfg)
+        .build();
+
+    let frame_size = stream_cfg.num_frames(); // samples per 10ms
+    let mut out = Vec::with_capacity(samples.len());
+
+    for chunk in samples.chunks(frame_size) {
+        if chunk.len() < frame_size {
+            // Partial tail: pad to a full frame, process, then take only the real samples.
+            let mut padded = chunk.to_vec();
+            padded.resize(frame_size, 0.0);
+            let mut dest = vec![0.0f32; frame_size];
+            let _ = apm.process_capture_f32(&[&padded], &mut [&mut dest]);
+            out.extend_from_slice(&dest[..chunk.len()]);
+        } else {
+            let mut dest = vec![0.0f32; frame_size];
+            let _ = apm.process_capture_f32(&[chunk], &mut [&mut dest]);
+            out.extend_from_slice(&dest);
+        }
+    }
+
+    out
+}
+
 /// List input device names to stdout (for `--list-devices`).
 pub fn list_devices() -> Result<()> {
     let host = cpal::default_host();
@@ -189,7 +238,7 @@ pub fn list_devices() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::resample;
+    use super::{apply_audio_processing, resample};
 
     #[test]
     fn resample_identity() {
@@ -208,6 +257,32 @@ mod tests {
         let s = vec![0.0f32; 300];
         let out = resample(&s, 48_000, 16_000);
         assert_eq!(out.len(), 100);
+    }
+
+    #[test]
+    fn apm_preserves_length() {
+        let rate = 48_000u32;
+        let samples: Vec<f32> = (0..rate as usize)
+            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / rate as f32).sin())
+            .collect();
+        let out = apply_audio_processing(&samples, rate);
+        assert_eq!(out.len(), samples.len());
+    }
+
+    #[test]
+    fn apm_empty_passthrough() {
+        assert!(apply_audio_processing(&[], 48_000).is_empty());
+    }
+
+    #[test]
+    fn apm_bounds() {
+        // Processed samples must stay within a reasonable range (NS+AGC can go slightly above 1.0).
+        let rate = 16_000u32;
+        let samples: Vec<f32> = (0..rate as usize)
+            .map(|i| (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / rate as f32).sin())
+            .collect();
+        let out = apply_audio_processing(&samples, rate);
+        assert!(out.iter().all(|v| v.abs() < 2.0));
     }
 
     #[test]
