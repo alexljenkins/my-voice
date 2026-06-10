@@ -10,6 +10,13 @@ license = "MIT"
 cpal = "0.15"
 hound = "3.5"            # debug wav dumps + --test mode only
 
+# Moonshine inference (primary backend, always compiled). ort 2.x is still rc;
+# pin the rc voxtype ships with. Default features include `download-binaries`,
+# which fetches a prebuilt static ONNX Runtime at build time.
+ort = { version = "2.0.0-rc.12", features = ["ndarray"] }
+ndarray = "0.16"
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+
 # CLI + config
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

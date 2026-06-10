@@ -1,11 +1,14 @@
 //! my-voice — hold-to-talk local voice typing.
 //!
-//! Phase 1: daemon starts, records while the hotkey is held, and writes a
-//! playable wav on release. No model, no injection yet.
+//! Phase 2: daemon records while the hotkey is held, then transcribes with
+//! Moonshine and prints the text. No injection yet.
 
 mod audio;
 mod config;
+mod download;
 mod hotkey;
+mod text;
+mod transcriber;
 
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -20,6 +23,8 @@ use tracing_subscriber::EnvFilter;
 use audio::AudioRecorder;
 use config::Config;
 use hotkey::{spawn_listener, HotkeyEvent};
+use text::post_process;
+use transcriber::Transcriber;
 
 const TEST_WAV: &str = "/tmp/my-voice-test.wav";
 
@@ -66,8 +71,7 @@ fn run(cli: Cli) -> Result<()> {
     debug!(?config, "loaded config");
 
     if cli.download {
-        eprintln!("model download arrives in Phase 2 — not available in this build");
-        return Ok(());
+        return download::run(&config);
     }
 
     if cli.test {
@@ -77,21 +81,29 @@ fn run(cli: Cli) -> Result<()> {
     run_daemon(&config)
 }
 
-/// Record a fixed 3s window and dump a wav — verifies the audio path without
-/// needing hotkey/input permissions.
+/// Record a fixed 3s window, dump a debug wav, transcribe, and print — verifies
+/// the full audio→text path without needing hotkey/input permissions.
 fn run_test(config: &Config) -> Result<()> {
+    let mut transcriber = transcriber::create(config)?;
     let mut recorder = AudioRecorder::new(&config.audio_device)?;
     info!("recording 3s for --test...");
     recorder.start()?;
     thread::sleep(Duration::from_secs(3));
     let samples = recorder.stop();
-    report_and_write(&samples, recorder.target_rate())?;
+    let rate = recorder.target_rate();
+    info!("captured {:.2}s", samples.len() as f32 / rate as f32);
+    if let Err(e) = write_wav(&samples, rate, TEST_WAV) {
+        warn!("failed to write {TEST_WAV}: {e}");
+    }
+    let text = post_process(&transcriber.transcribe(&samples)?);
+    println!("{text}");
     Ok(())
 }
 
 fn run_daemon(config: &Config) -> Result<()> {
     let _lock = single_instance::acquire().context("single-instance lock")?;
 
+    let mut transcriber = transcriber::create(config)?;
     let mut recorder = AudioRecorder::new(&config.audio_device)?;
 
     #[cfg(target_os = "macos")]
@@ -119,7 +131,7 @@ fn run_daemon(config: &Config) -> Result<()> {
                 // PTT trailing buffer: catch the tail of the last word.
                 thread::sleep(trailing);
                 let samples = recorder.stop();
-                handle_utterance(&samples, recorder.target_rate());
+                handle_utterance(transcriber.as_mut(), &samples, recorder.target_rate(), config);
                 state = State::Idle;
             }
             // Recording+Press (autorepeat dupe) and Idle+Release (stale): ignore.
@@ -137,35 +149,31 @@ enum State {
     Recording,
 }
 
-/// Phase 1 utterance handling: gate-log, then dump a wav. (Phase 2 transcribes.)
-fn handle_utterance(samples: &[f32], rate: u32) {
-    let secs = samples.len() as f32 / rate as f32;
-    let peak = samples.iter().fold(0.0f32, |a, b| a.max(b.abs()));
-    info!("utterance: {secs:.2}s, peak {peak:.3}");
-
-    // Gates that Phase 2 will use to discard before inference.
-    if (secs * 1000.0) < 300.0 {
-        debug!("(gate) below min_speech_ms — Phase 2 would discard");
+/// Gate, transcribe, post-process, print. Both gates discard before inference —
+/// ASR models hallucinate text on silence, so never feed them empty air.
+fn handle_utterance(transcriber: &mut dyn Transcriber, samples: &[f32], rate: u32, config: &Config) {
+    let ms = samples.len() as f32 / rate as f32 * 1000.0;
+    if ms < config.min_speech_ms as f32 {
+        debug!("discarded: {ms:.0}ms < min_speech_ms {}", config.min_speech_ms);
+        return;
     }
+    let peak = samples.iter().fold(0.0f32, |a, b| a.max(b.abs()));
     if peak < 0.01 {
-        debug!("(gate) near-silent — Phase 2 would discard");
+        debug!("discarded: peak {peak:.4} below silence floor");
+        return;
     }
 
-    if let Err(e) = write_wav(samples, rate, TEST_WAV) {
-        warn!("failed to write {TEST_WAV}: {e}");
-    } else {
-        info!("wrote {TEST_WAV}");
+    match transcriber.transcribe(samples) {
+        Ok(raw) => {
+            let text = post_process(&raw);
+            if text.is_empty() {
+                debug!("empty transcription");
+                return;
+            }
+            println!("{text}");
+        }
+        Err(e) => warn!("transcription failed: {e:#}"),
     }
-}
-
-fn report_and_write(samples: &[f32], rate: u32) -> Result<()> {
-    let secs = samples.len() as f32 / rate as f32;
-    let peak = samples.iter().fold(0.0f32, |a, b| a.max(b.abs()));
-    info!("captured {secs:.2}s, peak {peak:.3}");
-    write_wav(samples, rate, TEST_WAV)?;
-    info!("wrote {TEST_WAV}");
-    println!("{secs:.2}s @ {rate} Hz, peak {peak:.3} → {TEST_WAV}");
-    Ok(())
 }
 
 /// Write 16 kHz mono f32 samples as a 16-bit PCM wav.
