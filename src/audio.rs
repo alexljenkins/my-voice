@@ -1,8 +1,5 @@
-//! AudioRecorder: cpal input stream, mono downmix, linear resample to 16 kHz.
-//!
-//! The stream is created on `start()` and dropped on `stop()`. We accept the
-//! device's native rate/format (mics are 44.1/48 kHz) and resample to 16 kHz
-//! ourselves — requesting 16 kHz directly makes cpal error on most hardware.
+//! AudioRecorder: cpal input stream, mono downmix, sinc/FFT resample to 16 kHz.
+//! Pipeline: native-rate capture → rubato FFT resample → WebRTC APM → peak normalize → VAD silence trim.
 
 use std::sync::{Arc, Mutex};
 
@@ -33,15 +30,9 @@ impl AudioRecorder {
         let device = select_device(&host, audio_device)?;
         let name = device.name().unwrap_or_else(|_| "<unknown>".into());
 
-        let supported = device
-            .default_input_config()
-            .context("querying default input config")?;
-        let sample_format = supported.sample_format();
-        let channels = supported.channels() as usize;
-        let sample_rate = supported.sample_rate().0;
+        let (sample_format, channels, sample_rate) = select_stream_config(&device)?;
         info!("audio device: {name} ({sample_rate} Hz, {channels} ch, {sample_format:?})");
 
-        // Pre-allocate ~60s of mono audio at the device rate.
         let cap = sample_rate as usize * MAX_SECONDS;
         Ok(Self {
             device,
@@ -98,6 +89,14 @@ impl AudioRecorder {
 
     /// Stop the stream and return 16 kHz mono f32 samples in [-1, 1].
     pub fn stop(&mut self) -> Vec<f32> {
+        let (_, _, processed) = self.stop_with_raw();
+        processed
+    }
+
+    /// Stop the stream and return both the raw native-rate mono samples and the
+    /// fully processed 16 kHz samples. The raw buffer is at `self.sample_rate`
+    /// and is useful for writing a before/after comparison WAV.
+    pub fn stop_with_raw(&mut self) -> (Vec<f32>, u32, Vec<f32>) {
         self.stream = None; // drop → stop the stream
         let raw = std::mem::take(&mut *self.buffer.lock().unwrap());
         let raw_peak = raw.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
@@ -107,18 +106,36 @@ impl AudioRecorder {
             self.sample_rate,
             raw.len() as f32 / self.sample_rate as f32
         );
-        // Resample to 16 kHz *first*, then run the WebRTC APM at 16 kHz. The APM
-        // only supports 8/16/32/48 kHz; feeding it the device's native rate (e.g.
-        // 44.1 kHz) produces pitch-shifted, noisy garbage.
+        // APM only supports 8/16/32/48 kHz; resample first to avoid pitch-shifted garbage.
         let resampled = resample(&raw, self.sample_rate, TARGET_RATE);
         let mut processed = apply_audio_processing(&resampled, TARGET_RATE);
         normalize_peak(&mut processed);
-        processed
+        let processed = trim_silence(&processed, TARGET_RATE);
+        (raw, self.sample_rate, processed)
     }
 
     pub fn target_rate(&self) -> u32 {
         TARGET_RATE
     }
+}
+
+/// §8b: prefer 16 kHz native capture; falls back to the device default if unsupported.
+/// Eliminates the resample step entirely on compatible hardware.
+fn select_stream_config(device: &cpal::Device) -> Result<(SampleFormat, usize, u32)> {
+    if let Ok(mut configs) = device.supported_input_configs() {
+        if let Some(cfg) = configs.find(|c| {
+            c.min_sample_rate().0 <= TARGET_RATE && c.max_sample_rate().0 >= TARGET_RATE
+        }) {
+            debug!("device supports 16 kHz natively — resample step skipped");
+            return Ok((cfg.sample_format(), cfg.channels() as usize, TARGET_RATE));
+        }
+    }
+    let default = device.default_input_config().context("querying default input config")?;
+    Ok((
+        default.sample_format(),
+        default.channels() as usize,
+        default.sample_rate().0,
+    ))
 }
 
 fn select_device(host: &cpal::Host, wanted: &str) -> Result<cpal::Device> {
@@ -178,11 +195,63 @@ pub fn normalize_peak(samples: &mut [f32]) {
     }
 }
 
-/// Linear-interpolation resample. [voxtype — verbatim algorithm]
+/// §8a: polyphase FFT resample via rubato. Falls back to linear on init error.
 pub fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     if from_rate == to_rate || samples.is_empty() {
         return samples.to_vec();
     }
+    match resample_fft(samples, from_rate, to_rate) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("rubato init failed ({e}); falling back to linear resample");
+            resample_linear(samples, from_rate, to_rate)
+        }
+    }
+}
+
+fn resample_fft(samples: &[f32], from_rate: u32, to_rate: u32) -> Result<Vec<f32>> {
+    use rubato::{FftFixedOut, Resampler};
+
+    const OUT_CHUNK: usize = 1600; // 100 ms at 16 kHz
+    let mut resampler = FftFixedOut::<f32>::new(
+        from_rate as usize,
+        to_rate as usize,
+        OUT_CHUNK,
+        2,
+        1,
+    )
+    .map_err(|e| anyhow!("rubato: {e}"))?;
+
+    let expected = (samples.len() as f64 * to_rate as f64 / from_rate as f64).ceil() as usize;
+    let mut out = Vec::with_capacity(expected);
+    let mut pos = 0;
+
+    while pos < samples.len() {
+        let needed = resampler.input_frames_next();
+        if pos + needed <= samples.len() {
+            let chunk = resampler
+                .process(&[&samples[pos..pos + needed]], None)
+                .map_err(|e| anyhow!("rubato process: {e}"))?;
+            out.extend_from_slice(&chunk[0]);
+            pos += needed;
+        } else {
+            // Tail: zero-pad to full chunk, keep only proportional output frames.
+            let remaining = samples.len() - pos;
+            let mut padded = vec![0.0f32; needed];
+            padded[..remaining].copy_from_slice(&samples[pos..]);
+            let chunk = resampler
+                .process(&[&padded], None)
+                .map_err(|e| anyhow!("rubato tail: {e}"))?;
+            let keep = (remaining as f64 * to_rate as f64 / from_rate as f64).ceil() as usize;
+            out.extend_from_slice(&chunk[0][..chunk[0].len().min(keep)]);
+            break;
+        }
+    }
+
+    Ok(out)
+}
+
+fn resample_linear(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     let ratio = to_rate as f64 / from_rate as f64;
     let new_len = (samples.len() as f64 * ratio).ceil() as usize;
     let mut out = Vec::with_capacity(new_len);
@@ -216,8 +285,8 @@ pub fn apply_audio_processing(samples: &[f32], sample_rate: u32) -> Vec<f32> {
         }),
         gain_controller2: Some(GainController2 {
             adaptive_digital: Some(AdaptiveDigital {
-                headroom_db: 3.0, // target -3 dBFS
-                max_gain_db: 5.0, // cap boost at 5 dB
+                headroom_db: 1.0, // target -1 dBFS; normalize_peak is the real ceiling
+                max_gain_db: 12.0, // quiet mics need headroom; NS before AGC limits noise amp
                 ..Default::default()
             }),
             ..Default::default()
@@ -249,6 +318,50 @@ pub fn apply_audio_processing(samples: &[f32], sample_rate: u32) -> Vec<f32> {
     }
 
     out
+}
+
+/// §8d: trim leading/trailing silence using windowed RMS energy.
+/// After NS+AGC+normalize, the noise floor is well below SPEECH_RMS so speech
+/// frames stand out clearly. Falls back to the full buffer if nothing crosses the
+/// threshold (all-silence recordings are handled by the min-speech gate downstream).
+fn trim_silence(samples: &[f32], sample_rate: u32) -> Vec<f32> {
+    const WINDOW_MS: u32 = 10;
+    const SPEECH_RMS: f32 = 0.02;
+    const PAD_MS: u32 = 80;
+    const MIN_KEEP_MS: u32 = 100;
+
+    if samples.is_empty() {
+        return Vec::new();
+    }
+
+    let window = (sample_rate * WINDOW_MS / 1000) as usize;
+    let pad = (sample_rate * PAD_MS / 1000) as usize;
+    let min_keep = (sample_rate * MIN_KEEP_MS / 1000) as usize;
+
+    let speech: Vec<bool> = samples
+        .chunks(window.max(1))
+        .map(|w| (w.iter().map(|&s| s * s).sum::<f32>() / w.len() as f32).sqrt() > SPEECH_RMS)
+        .collect();
+
+    match (
+        speech.iter().position(|&s| s),
+        speech.iter().rposition(|&s| s),
+    ) {
+        (Some(f), Some(l)) => {
+            let start = (f * window).saturating_sub(pad);
+            let end = ((l + 1) * window + pad).min(samples.len());
+            if end - start < min_keep {
+                return samples.to_vec();
+            }
+            debug!(
+                "silence trim: {:.0}ms → {:.0}ms",
+                samples.len() as f32 / sample_rate as f32 * 1000.0,
+                (end - start) as f32 / sample_rate as f32 * 1000.0,
+            );
+            samples[start..end].to_vec()
+        }
+        _ => samples.to_vec(),
+    }
 }
 
 /// List input device names to stdout (for `--list-devices`).
@@ -334,7 +447,7 @@ mod tests {
             .collect();
         let out = resample(&sine, from, 16_000);
         assert_eq!(out.len(), 16_000);
-        assert!(out.iter().all(|v| v.abs() <= 1.0001));
+        assert!(out.iter().all(|v| v.abs() <= 1.05)); // FFT resampler can have minor overshoot
         let peak = out.iter().cloned().fold(0.0f32, |a, b| a.max(b.abs()));
         assert!(peak > 0.5, "resampled sine lost amplitude: {peak}");
     }

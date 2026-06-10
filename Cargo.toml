@@ -10,6 +10,7 @@ repository = "https://github.com/alexljenkins/my-voice"
 # Audio
 cpal = "0.15"
 hound = "3.5"            # debug wav dumps + --test mode only
+rubato = "0.14"          # sinc/FFT resampler (§8a)
 
 # Moonshine inference (primary backend, always compiled). ort 2.x is still rc;
 # pin the rc voxtype ships with. Default features include `download-binaries`,

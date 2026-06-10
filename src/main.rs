@@ -45,6 +45,15 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     wav: Option<PathBuf>,
 
+    /// Record from the mic, apply the full pipeline, save processed WAV to PATH
+    /// and a raw (pre-processing) WAV to <stem>_raw.wav. No model needed.
+    #[arg(long, value_name = "PATH")]
+    record: Option<PathBuf>,
+
+    /// Recording duration in seconds for --record (default: 5).
+    #[arg(long, value_name = "SECS", default_value = "5")]
+    duration: u64,
+
     /// Print audio input device names and exit.
     #[arg(long)]
     list_devices: bool,
@@ -60,7 +69,7 @@ struct Cli {
 
 fn main() {
     let cli = Cli::parse();
-    let is_daemon = !cli.download && !cli.test && cli.wav.is_none() && !cli.list_devices;
+    let is_daemon = !cli.download && !cli.test && cli.wav.is_none() && cli.record.is_none() && !cli.list_devices;
     let _log_guard = init_tracing(cli.verbose, is_daemon);
 
     if let Err(e) = run(cli) {
@@ -87,6 +96,10 @@ fn run(cli: Cli) -> Result<()> {
 
     if let Some(path) = cli.wav.as_deref() {
         return run_wav(&config, path);
+    }
+
+    if let Some(path) = cli.record {
+        return run_record(&config, &path, cli.duration);
     }
 
     run_daemon(config, cli.config)
@@ -142,6 +155,43 @@ fn run_test(config: &Config) -> Result<()> {
     }
     let text = post_process(&transcriber.transcribe(&samples)?);
     println!("{text}");
+    Ok(())
+}
+
+/// Record for `duration` seconds, apply the full pipeline, write both the
+/// processed and raw WAVs. No model loading — pure capture benchmark tool.
+fn run_record(config: &Config, output_path: &Path, duration_secs: u64) -> Result<()> {
+    let mut recorder = AudioRecorder::new(&config.audio_device)?;
+    info!("recording {}s for --record...", duration_secs);
+    recorder.start()?;
+    thread::sleep(Duration::from_secs(duration_secs));
+    let (raw_samples, raw_rate, processed) = recorder.stop_with_raw();
+
+    let duration_actual = processed.len() as f32 / recorder.target_rate() as f32;
+    let peak = processed.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
+
+    // Write processed WAV.
+    let processed_path = output_path.to_string_lossy();
+    write_wav(&processed, recorder.target_rate(), &processed_path)?;
+
+    // Derive raw path: <stem>_raw.wav next to the output file.
+    let raw_path = {
+        let stem = output_path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let parent = output_path.parent().unwrap_or_else(|| Path::new("."));
+        parent
+            .join(format!("{stem}_raw.wav"))
+            .to_string_lossy()
+            .into_owned()
+    };
+    write_wav(&raw_samples, raw_rate, &raw_path)?;
+
+    println!("duration:  {duration_actual:.2}s");
+    println!("peak:      {peak:.4}");
+    println!("processed: {processed_path}");
+    println!("raw:       {raw_path}");
     Ok(())
 }
 
