@@ -3,11 +3,13 @@ mod config;
 mod download;
 mod hotkey;
 mod injector;
+mod model_cache;
 mod text;
 mod transcriber;
 
 use std::path::PathBuf;
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -20,8 +22,8 @@ use audio::AudioRecorder;
 use config::Config;
 use hotkey::{spawn_listener, HotkeyEvent};
 use injector::Injector;
+use model_cache::ModelCache;
 use text::post_process;
-use transcriber::Transcriber;
 
 const TEST_WAV: &str = "/tmp/my-voice-test.wav";
 
@@ -142,7 +144,10 @@ fn run_test(config: &Config) -> Result<()> {
 fn run_daemon(config: &Config) -> Result<()> {
     let _lock = single_instance::acquire().context("single-instance lock")?;
 
-    let mut transcriber = transcriber::create(config)?;
+    // Lazy load: the daemon starts cold and holds no model in RAM until the
+    // first press. The evict thread reclaims it after idle (Phase 6).
+    let cache = ModelCache::new(config);
+    cache.start_evict_thread();
     let mut recorder = AudioRecorder::new(&config.audio_device)?;
     let mut typer = injector::detect(config);
     let mut clipper = injector::clipboard();
@@ -165,6 +170,14 @@ fn run_daemon(config: &Config) -> Result<()> {
                     warn!("could not start recording: {e}");
                     continue;
                 }
+                // Kick the cold-start load now so it overlaps with speech;
+                // transcribe() later blocks on the same lock if it's not done.
+                let preload = Arc::clone(&cache);
+                thread::spawn(move || {
+                    if let Err(e) = preload.ensure_loaded() {
+                        warn!("model preload failed: {e:#}");
+                    }
+                });
                 debug!(clipboard_only, "recording");
                 state = State::Recording { clipboard_only };
             }
@@ -177,7 +190,7 @@ fn run_daemon(config: &Config) -> Result<()> {
                 } else {
                     typer.as_mut()
                 };
-                handle_utterance(transcriber.as_mut(), &samples, recorder.target_rate(), config, inj);
+                handle_utterance(&cache, &samples, recorder.target_rate(), config, inj);
                 state = State::Idle;
             }
             // Recording+Press (autorepeat dupe) and Idle+Release (stale): ignore.
@@ -198,7 +211,7 @@ enum State {
 /// Gate, transcribe, post-process, inject. Both gates discard before inference —
 /// ASR models hallucinate text on silence, so never feed them empty air.
 fn handle_utterance(
-    transcriber: &mut dyn Transcriber,
+    cache: &ModelCache,
     samples: &[f32],
     rate: u32,
     config: &Config,
@@ -215,7 +228,7 @@ fn handle_utterance(
         return;
     }
 
-    match transcriber.transcribe(samples) {
+    match cache.transcribe(samples) {
         Ok(raw) => {
             let text = post_process(&raw);
             if text.is_empty() {
