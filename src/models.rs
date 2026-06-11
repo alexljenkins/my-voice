@@ -120,28 +120,28 @@ pub static MODELS: &[ModelSpec] = &[
         ],
         approx_mb: 64,
     },
-    // Streaming Moonshine (split-decoder ONNX). These ship int8-quantized only,
-    // so the "full" file set is identical to the quantized one. We run them as a
-    // single-pass push-to-talk transcription (full audio at once), not chunked.
+    // Streaming Moonshine (split-decoder ONNX, int8-quantized only).
+    // We run full audio as a single push-to-talk pass, not chunk-by-chunk.
+    // Self-hosted on HF with _quantized suffix to match the batch model convention.
     ModelSpec {
         name: "moonshine-streaming-small",
         label: "Accurate  •  moonshine-small",
-        hf_repo: "Mazino0/moonshine-streaming-small-onnx",
-        files_quantized: STREAMING_FILES,
-        files_full: STREAMING_FILES,
-        sentinel_quantized: "encoder_model_int8.onnx",
-        sentinel_full: "encoder_model_int8.onnx",
+        hf_repo: "alexjenkins89/moonshine-streaming-small-onnx",
+        files_quantized: STREAMING_FILES_SMALL,
+        files_full: STREAMING_FILES_SMALL,
+        sentinel_quantized: "encoder_model_quantized.onnx",
+        sentinel_full: "encoder_model_quantized.onnx",
         checksums: &[
             (
-                "encoder_model_int8.onnx",
+                "encoder_model_quantized.onnx",
                 "9bb6562667da35c8b6994bd76139528610738a33c1c3fa234024c75a6affa509",
             ),
             (
-                "decoder_model_int8.onnx",
+                "decoder_model_quantized.onnx",
                 "8c1a86e1b3059950d8285a47f3dae1fb6166f0337046e115965498e7957be158",
             ),
             (
-                "decoder_with_past_model_int8.onnx",
+                "decoder_with_past_model_quantized.onnx",
                 "e9bfbc4f2b34ea82ff5b562cc20d3eafcf87a8a25ea9bcaabd8513078dbc0565",
             ),
             (
@@ -154,22 +154,22 @@ pub static MODELS: &[ModelSpec] = &[
     ModelSpec {
         name: "moonshine-streaming-medium",
         label: "Most accurate  •  moonshine-medium",
-        hf_repo: "Mazino0/moonshine-streaming-medium-onnx",
-        files_quantized: STREAMING_FILES,
-        files_full: STREAMING_FILES,
-        sentinel_quantized: "encoder_model_int8.onnx",
-        sentinel_full: "encoder_model_int8.onnx",
+        hf_repo: "alexjenkins89/moonshine-streaming-medium-onnx",
+        files_quantized: STREAMING_FILES_MEDIUM,
+        files_full: STREAMING_FILES_MEDIUM,
+        sentinel_quantized: "encoder_model_quantized.onnx",
+        sentinel_full: "encoder_model_quantized.onnx",
         checksums: &[
             (
-                "encoder_model_int8.onnx",
+                "encoder_model_quantized.onnx",
                 "4f6c491eb4018a06f2e9ecf5b6bab5c6fa4e679c9ed5dde02a0a27969649be90",
             ),
             (
-                "decoder_model_int8.onnx",
+                "decoder_model_quantized.onnx",
                 "38dfe5829fcb814e33634c00baedceaa877acaac7b731203e88eb956d4419875",
             ),
             (
-                "decoder_with_past_model_int8.onnx",
+                "decoder_with_past_model_quantized.onnx",
                 "36d7ea3cf4feb6e37fe784ba3ac7cee0bb5f4d757ab05433e2550b8eae035a7e",
             ),
             (
@@ -181,14 +181,34 @@ pub static MODELS: &[ModelSpec] = &[
     },
 ];
 
-/// Streaming repos lay files at the repo root with `_int8` suffixes and ship no
-/// full-precision variant, so quantized and full share this list.
-const STREAMING_FILES: &[FileEntry] = &[
-    ("encoder_model_int8.onnx", "encoder_model_int8.onnx"),
-    ("decoder_model_int8.onnx", "decoder_model_int8.onnx"),
+const STREAMING_FILES_SMALL: &[FileEntry] = &[
     (
-        "decoder_with_past_model_int8.onnx",
-        "decoder_with_past_model_int8.onnx",
+        "encoder_model_quantized.onnx",
+        "encoder_model_quantized.onnx",
+    ),
+    (
+        "decoder_model_quantized.onnx",
+        "decoder_model_quantized.onnx",
+    ),
+    (
+        "decoder_with_past_model_quantized.onnx",
+        "decoder_with_past_model_quantized.onnx",
+    ),
+    ("tokenizer.json", "tokenizer.json"),
+];
+
+const STREAMING_FILES_MEDIUM: &[FileEntry] = &[
+    (
+        "encoder_model_quantized.onnx",
+        "encoder_model_quantized.onnx",
+    ),
+    (
+        "decoder_model_quantized.onnx",
+        "decoder_model_quantized.onnx",
+    ),
+    (
+        "decoder_with_past_model_quantized.onnx",
+        "decoder_with_past_model_quantized.onnx",
     ),
     ("tokenizer.json", "tokenizer.json"),
 ];

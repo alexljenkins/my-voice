@@ -6,8 +6,8 @@
 //! * **Merged** (`moonshine-tiny`/`-base`): one `decoder_model_merged.onnx`
 //!   switched by a `use_cache_branch` flag. KV names are `past_key_values.*` /
 //!   `present.*`. Faithful port of voxtype's backend.
-//! * **Split** (streaming `-small`/`-medium`): a no-past `decoder_model.onnx`
-//!   for step 0 and a `decoder_with_past_model.onnx` for later steps. Self-attn
+//! * **Split** (streaming `-small`/`-medium`): a no-past `decoder_model_quantized.onnx`
+//!   for step 0 and a `decoder_with_past_model_quantized.onnx` for later steps. Self-attn
 //!   KV (`past_self_*` / `present_self_*`) grows each step; cross-attn KV is
 //!   computed once at step 0 and fed back as `present_cross_*_orig`. The
 //!   streaming encoder also takes an `attention_mask` input. We run it as a
@@ -112,15 +112,11 @@ impl Moonshine {
             .map(str::to_string);
 
         // --- Decoder: split if a with-past graph is present, else merged.
-        let decoder = if let Some(with_past_path) = pick(
-            dir,
-            &[
-                "decoder_with_past_model_int8.onnx",
-                "decoder_with_past_model.onnx",
-            ],
-        ) {
-            let initial_path = pick(dir, &["decoder_model_int8.onnx", "decoder_model.onnx"])
-                .ok_or_else(|| {
+        let decoder = if let Some(with_past_path) =
+            pick(dir, &["decoder_with_past_model_quantized.onnx"])
+        {
+            let initial_path =
+                pick(dir, &["decoder_model_quantized.onnx"]).ok_or_else(|| {
                     anyhow!("split decoder missing no-past graph in {}", dir.display())
                 })?;
             let initial = build_session(&initial_path, threads)?;
@@ -532,21 +528,11 @@ fn pick(dir: &Path, names: &[&str]) -> Option<PathBuf> {
     names.iter().map(|n| dir.join(n)).find(|p| p.exists())
 }
 
-/// Encoder filename preference. Streaming repos ship only the `_int8` variant;
-/// the merged repos ship `_quantized` + full.
 fn encoder_candidates(quantized: bool) -> &'static [&'static str] {
     if quantized {
-        &[
-            "encoder_model_quantized.onnx",
-            "encoder_model_int8.onnx",
-            "encoder_model.onnx",
-        ]
+        &["encoder_model_quantized.onnx", "encoder_model.onnx"]
     } else {
-        &[
-            "encoder_model.onnx",
-            "encoder_model_quantized.onnx",
-            "encoder_model_int8.onnx",
-        ]
+        &["encoder_model.onnx", "encoder_model_quantized.onnx"]
     }
 }
 

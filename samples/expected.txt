@@ -1,5 +1,5 @@
-1781151399_raw.wav hello hello this is a test
-1781151431_raw.wav hello hello test number two
-1781151452_raw.wav this is perfect, amazing job
-1781155689_raw.wav what do you want to shop for?
-1781155800_raw.wav hello hello hello
+1781151399_raw.wav	hello hello this is a test
+1781151431_raw.wav	hello hello test number two
+1781151452_raw.wav	this is perfect, amazing job
+1781155689_raw.wav	what do you want to shop for?
+1781155800_raw.wav	hello hello hello
