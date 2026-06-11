@@ -304,7 +304,7 @@ pub fn clipboard_injector() -> Box<dyn Injector> {
 /// Whether "Paste at cursor" can actually type, plus a plain-language unlock hint
 /// for the menu when it can't. Probed at startup and on reload (cheap: PATH checks
 /// + one D-Bus probe on X11). The hint names the missing tool and the exact install
-/// command for the detected package manager.
+///   command for the detected package manager.
 pub fn typing_availability() -> (bool, String) {
     match detect_session() {
         Session::Wayland => {

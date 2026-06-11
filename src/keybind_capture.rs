@@ -286,6 +286,7 @@ impl CaptureApp {
 
 /// Render `text` into the softbuffer at the given top-left baseline-ish origin.
 /// Simple left-to-right layout with kerning; alpha-blends glyph coverage over BG.
+#[allow(clippy::too_many_arguments)]
 fn draw_text(
     buf: &mut [u32],
     buf_w: u32,

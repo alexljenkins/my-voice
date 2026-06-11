@@ -14,9 +14,9 @@ use std::thread;
 use anyhow::{anyhow, Result};
 use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
 use core_graphics::event::{
-    CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType, EventField,
+    CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
+    CGEventType, EventField,
 };
-use core_graphics::event_source::CGEventFlags;
 use tracing::{error, info, warn};
 
 use super::HotkeyEvent;
@@ -84,7 +84,7 @@ fn run_tap(clipboard_hotkey: bool, tx: Sender<HotkeyEvent>) {
         ],
         move |_proxy, event_type, event| {
             // Re-enable if the OS disabled us for being slow.
-            if event_type == CGEventType::TapDisabledByTimeout {
+            if matches!(event_type, CGEventType::TapDisabledByTimeout) {
                 return Some(event.to_owned());
             }
 
@@ -123,7 +123,7 @@ fn run_tap(clipboard_hotkey: bool, tx: Sender<HotkeyEvent>) {
         }
     };
 
-    let source = match tap.mach_port().create_runloop_source(0) {
+    let source = match tap.mach_port.create_runloop_source(0) {
         Ok(s) => s,
         Err(()) => {
             error!("could not create run loop source for event tap");

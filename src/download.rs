@@ -85,18 +85,14 @@ fn run_with_progress(config: &Config, on_progress: impl Fn(u8)) -> Result<()> {
         let base_pct = (i as u8 * 100) / n;
         let range = (100u8 / n).max(1);
         download_file(spec, remote, &dest.join(base), |done, total| {
-            let within = if total > 0 {
-                ((done * range as u64) / total) as u8
-            } else {
-                0
-            };
+            let within = (done * range as u64).checked_div(total).unwrap_or(0) as u8;
             on_progress((base_pct + within).min(99));
         })?;
     }
     Ok(())
 }
 
-fn files_for<'a>(spec: &'a ModelSpec, quantized: bool) -> &'a [crate::models::FileEntry] {
+fn files_for(spec: &ModelSpec, quantized: bool) -> &[crate::models::FileEntry] {
     if quantized {
         spec.files_quantized
     } else {

@@ -87,16 +87,16 @@ fn spawn_x11(config: &Config, tx: Sender<HotkeyEvent>) -> Result<()> {
     } else {
         let mut base = ModMask::from(0u16);
         if mods.ctrl {
-            base = base | ModMask::CONTROL;
+            base |= ModMask::CONTROL;
         }
         if mods.shift {
-            base = base | ModMask::SHIFT;
+            base |= ModMask::SHIFT;
         }
         if mods.alt {
-            base = base | ModMask::M1;
+            base |= ModMask::M1;
         }
         if mods.sup {
-            base = base | ModMask::M4;
+            base |= ModMask::M4;
         }
         let lock_variants = [
             ModMask::from(0u16),
@@ -211,7 +211,7 @@ fn keysym_to_keycode(conn: &x11rb::rust_connection::RustConnection, keysym: u32)
 
     let per = mapping.keysyms_per_keycode as usize;
     for (i, chunk) in mapping.keysyms.chunks(per).enumerate() {
-        if chunk.iter().any(|&s| s == keysym) {
+        if chunk.contains(&keysym) {
             return Ok(first.saturating_add(i as u8));
         }
     }

@@ -39,9 +39,9 @@ fn make_icon(bitmap: &[u16; 16], size: usize, r: u8, g: u8, b: u8) -> ksni::Icon
     let scale = (size / 16).max(1);
     let actual = scale * 16;
     let mut data = vec![0u8; actual * actual * 4];
-    for row in 0..16usize {
+    for (row, &row_bits) in bitmap.iter().enumerate() {
         for col in 0..16usize {
-            if (bitmap[row] >> (15 - col)) & 1 == 0 {
+            if (row_bits >> (15 - col)) & 1 == 0 {
                 continue;
             }
             for dr in 0..scale {

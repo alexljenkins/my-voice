@@ -2,7 +2,6 @@
 ///
 /// Adding a new auto-downloadable model means adding one entry here; no other
 /// files need touching.
-
 pub type FileEntry = (&'static str, &'static str);
 
 /// Which transcription backend a model requires.
