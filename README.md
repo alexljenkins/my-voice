@@ -1,125 +1,210 @@
 # my-voice
 
-Hold-to-talk local voice typing. English. Fast. Lean.
-
-Push and hold **CapsLock**, speak, release — text appears in the focused window. No cloud, no GUI, no subscription. Everything runs locally on CPU.
-
-## How it works
-
-1. Hotkey held → mic opens.
-2. Release → trailing 150ms captured, audio pre-processed (HPF + noise suppression + AGC via WebRTC APM), transcribed by [Moonshine](https://github.com/usefulsensors/moonshine) tiny quantized (~50 MB, ~10× real-time on CPU).
-3. Text injected into the focused window via AT-SPI / `wtype` / `ydotool` / `xdotool` (Linux) or CGEvent unicode injection (macOS). Hold **Shift+CapsLock** to copy to clipboard instead.
+Hold **CapsLock**, speak, release — your words appear in whatever app is focused. No cloud, no subscription. Everything runs locally on your computer.
 
 ## Requirements
 
-- Rust stable — install via [rustup](https://rustup.rs)
-- Linux or macOS
 - A working microphone
-- `cmake` + a C++ toolchain **only** if building with `--features whisper` (optional)
+- Linux or macOS
+- [Rust](https://rustup.rs) — the build tool (one install, then mostly forgotten)
+
+---
 
 ## Install
 
+### Linux
+
 ```sh
+# 1. Install Rust (skip if you already have it)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
+
+# 2. Install my-voice
 cargo install --git https://github.com/alexljenkins/my-voice
-my-voice --download   # fetch the default model (~50 MB)
-my-voice              # start the daemon
+
+# 3. Download the voice model (~50 MB, one-time)
+my-voice --download
+
+# 4. Start
+my-voice
 ```
 
-Or from source:
+A mic icon will appear in your system tray. Right-click it to change your microphone, model, and other settings.
 
-```sh
-git clone https://github.com/alexljenkins/my-voice
-cd my-voice
-cargo build --release
-./target/release/my-voice --download
-./target/release/my-voice
-```
-
-### Linux permissions
-
-The daemon reads `/dev/input` and creates a uinput virtual keyboard for passthrough. On a fresh system you'll need:
+**New to Linux or hitting permission errors?** You may need to grant keyboard access first:
 
 ```sh
 sudo usermod -aG input $USER
 echo 'KERNEL=="uinput", GROUP="input", MODE="0660"' | sudo tee /etc/udev/rules.d/99-my-voice.rules
 sudo modprobe uinput
-# to persist across reboots: add 'uinput' to /etc/modules-load.d/modules
-# then log out and back in (or reboot)
 ```
 
-Until you do this, the daemon falls back to **ungrabbed mode** — the hotkey still works but CapsLock also toggles the caps-lock LED/state as a side effect.
+Then **log out and back in**, and run `my-voice` again.
 
-Without read access to `/dev/input`, you'll see:
+> Without this step, my-voice still works — but CapsLock will also toggle the caps-lock state as a side-effect.
+
+<details>
+<summary>Linux — more details and troubleshooting</summary>
+
+### What the permissions do
+
+- `input` group — lets my-voice read keyboard events from `/dev/input`
+- `udev` rule — gives the group write access to the `uinput` virtual keyboard
+- `uinput` module — kernel module for creating virtual input devices (loaded automatically on most distros)
+
+To persist `uinput` across reboots, add it to your modules list:
+```sh
+echo 'uinput' | sudo tee -a /etc/modules-load.d/modules.conf
+```
+
+### Text doesn't appear (GNOME / Wayland)
+
+`wtype` doesn't work on GNOME Wayland. my-voice automatically falls back to **AT-SPI** (GNOME's accessibility bus), which is on by default and needs no setup.
+
+If AT-SPI is disabled or a specific app ignores it, install `ydotool`:
+
+```sh
+sudo apt install ydotool
+ydotoold &   # start the daemon (add to autostart)
+```
+
+Or switch to clipboard mode via the **Paste mode** submenu in the tray, then paste with Ctrl+V.
+
+### Keyboard unresponsive after a crash
+
+A hard `kill -9` can leave the keyboard grabbed. The kernel releases it automatically within a few seconds. If it stays stuck:
+
+```sh
+pkill my-voice
+```
+
+Or switch to a TTY with **Ctrl+Alt+F2** and run the command there.
+
+### Wrong microphone selected
+
+The tray **Microphone** submenu lists all detected input devices — click the one you want.
+
+Alternatively, run `my-voice --list-devices` to see device names and set `audio_device = "Headset"` (or any substring) in the config file.
+
+### Model not found
 
 ```
-no accessible keyboard reporting 'CapsLock'
-Fix: sudo usermod -aG input $USER   (then re-login)
+model file missing — run: my-voice --download
 ```
 
-### macOS permissions
+Run `my-voice --download` to fetch the configured model.
 
-The daemon remaps CapsLock → F18 via `hidutil` (mapping is active only while the daemon runs; restored on exit). It creates a CGEvent tap to intercept F18 keystrokes.
+</details>
 
-Grant two permissions in **System Settings → Privacy & Security**:
-- **Input Monitoring** — enable the terminal or binary
-- **Accessibility** — enable the terminal or binary
+---
 
-If either permission is missing, the daemon prints an error and exits with instructions.
+### macOS
 
-> **Note:** If the daemon crashes without a clean exit, the hidutil remap may stay active. Restore it manually:
-> ```sh
-> hidutil property --set '{"UserKeyMapping":[]}'
-> ```
+```sh
+# 1. Install Rust (skip if you already have it)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
+
+# 2. Install my-voice
+cargo install --git https://github.com/alexljenkins/my-voice
+
+# 3. Download the voice model (~50 MB, one-time)
+my-voice --download
+
+# 4. Start
+my-voice
+```
+
+macOS will ask for two permissions — grant both:
+
+1. Open **System Settings → Privacy & Security → Input Monitoring** — find your terminal and enable it
+2. Open **System Settings → Privacy & Security → Accessibility** — find your terminal and enable it
+
+Then run `my-voice` again. Use **Ctrl+C** in the terminal to stop it.
+
+> **Note:** The macOS tray icon is not yet available. All settings are managed via the [config file](#configuration) for now.
+
+<details>
+<summary>macOS — more details and troubleshooting</summary>
+
+### How the hotkey works on macOS
+
+The daemon remaps CapsLock → F18 via `hidutil` while it's running. The original CapsLock behavior is restored when you quit. If the app crashes without a clean exit, restore it manually:
+
+```sh
+hidutil property --set '{"UserKeyMapping":[]}'
+```
+
+### Permissions not sticking
+
+If you granted permissions but the daemon still exits with an error, try:
+1. Quitting and reopening your terminal
+2. Removing and re-adding the permission entry in System Settings
+3. Running `my-voice` directly from `/usr/local/bin/my-voice` instead of through a shell wrapper
+
+### Wrong microphone
+
+Run `my-voice --list-devices` to see device names, then set `audio_device = "Headset"` (or any substring match) in the [config file](#configuration).
+
+</details>
+
+---
 
 ## Usage
 
-```
-my-voice                 # run the daemon (hold CapsLock to record)
-my-voice --download      # fetch the configured model, then exit
-my-voice --test          # record 3s from mic, transcribe, print, exit
-my-voice --list-devices  # print audio input device names, exit
-my-voice --config PATH   # use an alternate config file
-my-voice -v / -vv        # info / debug logging (RUST_LOG also respected)
-```
+| Action | Result |
+|---|---|
+| Hold **CapsLock** → speak → release | Text typed into focused window |
+| Hold **Shift+CapsLock** → speak → release | Text copied to clipboard |
 
-**Shift+CapsLock** copies to clipboard instead of typing — useful in terminals and apps where direct injection is unreliable.
+On Linux, right-click the tray icon to adjust model, microphone, paste mode, and startup settings — no config file needed.
 
-## Configuration
+---
 
-Optional — defaults work out of the box. Create `~/.config/my-voice/config.toml` to override:
+<details>
+<summary>Configuration file (optional)</summary>
+
+Defaults work out of the box. To override, create `~/.config/my-voice/config.toml`:
 
 ```toml
-model = "moonshine-tiny"   # "moonshine-tiny" | "moonshine-base" | /path/to/dir | /path/to/file.gguf
+model = "moonshine-tiny"    # "moonshine-tiny" | "moonshine-base" | /path/to/model
 model_dir = "~/.local/share/my-voice/models"
-quantized = true           # prefer quantized .onnx files (smaller, faster, negligible WER cost)
-threads = 0                # 0 = auto (min(cpu_count, 4))
-load_timeout_secs = 300    # idle eviction; -1 = never unload, 0 = reload every use
-hotkey = "CapsLock"        # evdev key name on Linux (macOS: only CapsLock in v1)
-clipboard_hotkey = true    # Shift+hotkey → clipboard instead of typing
-grab = true                # Linux: exclusive grab + uinput passthrough
-audio_device = ""          # substring match against device name; "" = system default
-min_speech_ms = 300        # discard holds shorter than this (accidental taps)
-trailing_silence_ms = 150  # extra silence captured after release (catches last word tail)
-injection = "auto"         # auto | wtype | xdotool | ydotool | atspi | clipboard
+quantized = true            # smaller, faster — negligible accuracy cost
+threads = 0                 # 0 = auto (up to 4)
+load_timeout_secs = 300     # idle eviction; -1 = never unload, 0 = reload every use
+hotkey = "CapsLock"         # evdev key name (Linux); macOS only supports CapsLock in v1
+clipboard_hotkey = true     # Shift+hotkey → clipboard
+grab = true                 # Linux: exclusive grab + virtual keyboard passthrough
+audio_device = ""           # substring match against device name; "" = system default
+min_speech_ms = 300         # discard holds shorter than this (prevents accidental triggers)
+trailing_silence_ms = 150   # extra audio captured after release (catches word endings)
+injection = "auto"          # auto | wtype | xdotool | ydotool | atspi | clipboard
 ```
 
-Unknown config keys warn and are ignored.
+Unknown keys are warned and ignored.
 
-## Models
+Run `my-voice --config /path/to/file.toml` to use an alternate config file.
 
-| Name | Download size (quantized) | CPU speed | Notes |
+</details>
+
+<details>
+<summary>Models</summary>
+
+| Model | Size (quantized) | Speed | Best for |
 |---|---|---|---|
-| `moonshine-tiny` | ~50 MB | ~10× real-time | Default; good for clear speech |
-| `moonshine-base` | ~200 MB | ~4× real-time | Better for noisy mic or accents |
+| `moonshine-tiny` | ~50 MB | ~10× real-time | Default; clear speech |
+| `moonshine-base` | ~200 MB | ~4× real-time | Noisy mic or accents |
 
-Models are fetched from HuggingFace (`onnx-community/moonshine-*-ONNX`) and cached in `~/.local/share/my-voice/models/`. Run `my-voice --download` after changing the `model` config.
+Switch models from the **Model** submenu in the tray (Linux), or by editing `model` in the config file. Run `my-voice --download` after changing the model.
 
-### whisper.cpp backend (optional)
+Models are downloaded from HuggingFace and cached in `~/.local/share/my-voice/models/`.
 
-For `.gguf` model files, build with the whisper feature:
+### Whisper backend (advanced)
+
+Supports `.gguf` model files via `whisper.cpp`. Requires `cmake` and a C++ toolchain at build time:
 
 ```sh
-cargo build --release --features whisper
+cargo install --git https://github.com/alexljenkins/my-voice --features whisper
 ```
 
 Then point `model` at a `.gguf` file:
@@ -128,50 +213,39 @@ Then point `model` at a `.gguf` file:
 model = "/path/to/ggml-base.en.gguf"
 ```
 
-Use the `.en` (English-only) variants — they're faster and more accurate at the same size than the multilingual models. Recommended: `ggml-base.en.gguf` or `ggml-small.en.gguf` from [ggerganov/whisper.cpp](https://github.com/ggerganov/whisper.cpp).
+Use `.en` English-only variants (faster and more accurate). Recommended: `ggml-base.en.gguf` or `ggml-small.en.gguf` from [ggerganov/whisper.cpp](https://github.com/ggerganov/whisper.cpp).
 
-Requires `cmake` and a C++ toolchain at build time only.
+</details>
 
-## Troubleshooting
+<details>
+<summary>Troubleshooting</summary>
 
-**GNOME Wayland — text doesn't appear:**
-`wtype` fails on GNOME (compositor lacks the virtual-keyboard protocol). The daemon automatically falls back to **AT-SPI**, GNOME's accessibility bus, which is enabled by default and needs no setup or elevated permissions — so on a stock Ubuntu GNOME install injection should just work.
+**Model not found**
+```
+model file missing — run: my-voice --download
+```
+Run `my-voice --download`.
 
-If AT-SPI is disabled or a particular app ignores it, install `ydotool` for universal injection:
+**Keyboard disconnected and reconnected**
+Restart the daemon. Hotplug detection isn't supported in v1.
+
+**Verify your microphone works**
+```sh
+my-voice --test   # records 3 seconds and prints the transcription
+```
+
+</details>
+
+<details>
+<summary>Development</summary>
 
 ```sh
-sudo apt install ydotool
-ydotoold &   # start the ydotool daemon (add to autostart)
+cargo test                          # unit tests (no audio, model, or network needed)
+cargo clippy -- -D warnings         # lint
+cargo fmt                           # format
+cargo build --features whisper      # opt-in whisper.cpp backend (needs cmake)
 ```
 
-Or use clipboard mode: `injection = "clipboard"` in config, then paste with Ctrl+V.
+Tests cover: resample math, config round-trip, quote normalization, key-name parsing, max-token clamping, injection chain selection.
 
-**Wrong microphone:**
-Run `my-voice --list-devices` and set `audio_device = "Headset"` (case-insensitive substring match) in config.
-
-**Keyboard unresponsive after crash (Linux):**
-The evdev grab is released when file descriptors close (normal exit or SIGTERM). A hard `kill -9` skips this — the kernel holds the grab until the FD is garbage-collected, which typically happens within seconds. If the keyboard stays stuck, switch to a TTY with Ctrl+Alt+F2 and run:
-
-```sh
-pkill my-voice
-```
-
-**Hotplug:**
-If your keyboard disconnects and reconnects, restart the daemon. Hotplug detection is out of scope for v1.
-
-**Model not found:**
-```
-model file missing: /path/to/model — run: my-voice --download
-```
-Run `my-voice --download` to fetch the configured model.
-
-## Development
-
-```sh
-cargo test                         # unit tests (no audio/model/network required)
-cargo clippy -- -D warnings        # lint
-cargo fmt                          # format
-cargo build --features whisper     # opt-in backend (needs cmake)
-```
-
-Tests are pure-logic only (resample math, config round-trip, quote normalization, key-name parsing, max-token clamping, injection chain selection). No microphone, model files, or network access needed in CI.
+</details>
