@@ -15,7 +15,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+#[cfg(feature = "debug-tools")]
+use anyhow::Context;
+use anyhow::Result;
 use clap::Parser;
 use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -28,6 +30,7 @@ use model_cache::ModelCache;
 use text::post_process;
 use ui::{ModelItem, TrayMenuState, TrayState, UiCommand, UiHandle};
 
+#[cfg(feature = "debug-tools")]
 const TEST_WAV: &str = "/tmp/my-voice-test.wav";
 
 #[derive(Parser, Debug)]
@@ -38,19 +41,23 @@ struct Cli {
     download: bool,
 
     /// Record 3s from the mic, save a wav, print stats, exit (no hotkey).
+    #[cfg(feature = "debug-tools")]
     #[arg(long)]
     test: bool,
 
     /// Transcribe a wav file directly (bypasses the mic), print, exit.
+    #[cfg(feature = "debug-tools")]
     #[arg(long, value_name = "PATH")]
     wav: Option<PathBuf>,
 
     /// Record from the mic, apply the full pipeline, save processed WAV to PATH
     /// and a raw (pre-processing) WAV to <stem>_raw.wav. No model needed.
+    #[cfg(feature = "debug-tools")]
     #[arg(long, value_name = "PATH")]
     record: Option<PathBuf>,
 
     /// Recording duration in seconds for --record (default: 5).
+    #[cfg(feature = "debug-tools")]
     #[arg(long, value_name = "SECS", default_value = "5")]
     duration: u64,
 
@@ -69,7 +76,11 @@ struct Cli {
 
 fn main() {
     let cli = Cli::parse();
-    let is_daemon = !cli.download && !cli.test && cli.wav.is_none() && cli.record.is_none() && !cli.list_devices;
+    #[cfg(feature = "debug-tools")]
+    let debug_invocation = cli.test || cli.wav.is_some() || cli.record.is_some();
+    #[cfg(not(feature = "debug-tools"))]
+    let debug_invocation = false;
+    let is_daemon = !cli.download && !debug_invocation && !cli.list_devices;
     let _log_guard = init_tracing(cli.verbose, is_daemon);
 
     if let Err(e) = run(cli) {
@@ -90,14 +101,17 @@ fn run(cli: Cli) -> Result<()> {
         return download::run(&config);
     }
 
+    #[cfg(feature = "debug-tools")]
     if cli.test {
         return run_test(&config);
     }
 
+    #[cfg(feature = "debug-tools")]
     if let Some(path) = cli.wav.as_deref() {
         return run_wav(&config, path);
     }
 
+    #[cfg(feature = "debug-tools")]
     if let Some(path) = cli.record {
         return run_record(&config, &path, cli.duration);
     }
@@ -107,6 +121,7 @@ fn run(cli: Cli) -> Result<()> {
 
 /// Feed a wav file straight through the transcriber — isolates the inference
 /// path from the mic/capture path. Resamples to 16 kHz mono if needed.
+#[cfg(feature = "debug-tools")]
 fn run_wav(config: &Config, path: &std::path::Path) -> Result<()> {
     let mut reader = hound::WavReader::open(path).with_context(|| format!("opening {path:?}"))?;
     let spec = reader.spec();
@@ -141,6 +156,7 @@ fn run_wav(config: &Config, path: &std::path::Path) -> Result<()> {
 
 /// Record a fixed 3s window, dump a debug wav, transcribe, and print — verifies
 /// the full audio→text path without needing hotkey/input permissions.
+#[cfg(feature = "debug-tools")]
 fn run_test(config: &Config) -> Result<()> {
     let mut transcriber = transcriber::create(config)?;
     let mut recorder = AudioRecorder::new(&config.audio_device)?;
@@ -160,6 +176,7 @@ fn run_test(config: &Config) -> Result<()> {
 
 /// Record for `duration` seconds, apply the full pipeline, write both the
 /// processed and raw WAVs. No model loading — pure capture benchmark tool.
+#[cfg(feature = "debug-tools")]
 fn run_record(config: &Config, output_path: &Path, duration_secs: u64) -> Result<()> {
     let mut recorder = AudioRecorder::new(&config.audio_device)?;
     info!("recording {}s for --record...", duration_secs);
@@ -274,7 +291,7 @@ fn run_daemon(mut config: Config, config_path: Option<PathBuf>) -> Result<()> {
         notify::once(
             notify::ErrorKind::ModelMissing,
             "Speech model not found",
-            "Downloading the speech model now (~70 MB). my-voice will be ready in a moment.",
+            "Downloading the speech model now (~50 MB). my-voice will be ready in a moment.",
         );
         let tx = daemon_tx.clone();
         download::start_background(config.clone(), move |event| {
@@ -287,6 +304,16 @@ fn run_daemon(mut config: Config, config_path: Option<PathBuf>) -> Result<()> {
             let _ = tx.send(msg);
         });
         ui.set_state(TrayState::Downloading { pct: 0 });
+    } else {
+        // Model already present — pre-warm the cache so first keydown has no
+        // cold-start latency. 2s delay lets the tray settle before the load.
+        let preload = Arc::clone(&cache);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_secs(2));
+            if let Err(e) = preload.ensure_loaded() {
+                warn!("startup preload failed: {e:#}");
+            }
+        });
     }
 
     let mut trailing = Duration::from_millis(config.trailing_silence_ms);
@@ -653,6 +680,7 @@ fn handle_utterance(
 }
 
 /// Write 16 kHz mono f32 samples as a 16-bit PCM wav.
+#[cfg(feature = "debug-tools")]
 fn write_wav(samples: &[f32], rate: u32, path: &str) -> Result<()> {
     let spec = hound::WavSpec {
         channels: 1,
@@ -847,7 +875,7 @@ mod tests {
     fn model_fields_rebuild_cache() {
         for new in [
             Config {
-                model: "moonshine-tiny".into(),
+                model: "moonshine-base".into(),
                 ..cfg()
             },
             Config { threads: 2, ..cfg() },

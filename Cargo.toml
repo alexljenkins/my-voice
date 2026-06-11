@@ -9,7 +9,8 @@ repository = "https://github.com/alexljenkins/my-voice"
 [dependencies]
 # Audio
 cpal = "0.15"
-hound = "3.5"            # debug wav dumps + --test mode only
+# wav I/O for the debug-tools CLI (--test/--wav/--record); not in the default build.
+hound = { version = "3.5", optional = true }
 rubato = "0.14"          # sinc/FFT resampler (§8a)
 
 # Moonshine inference (primary backend, always compiled). ort 2.x is still rc;
@@ -28,8 +29,9 @@ dirs = "5"
 # whisper.cpp backend — opt-in; compiles C++ via cmake.
 whisper-rs = { version = "0.16", optional = true }
 
-# Model download (wired in Phase 2; declared now to keep the dep set stable)
+# Model download + integrity check.
 ureq = "2"
+sha2 = "0.10"
 
 # Util
 anyhow = "1"
@@ -61,6 +63,9 @@ libc = "0.2"             # flock single-instance + signal handler
 [features]
 default = []
 whisper = ["dep:whisper-rs"]
+# Capture/transcribe diagnostics (--test/--wav/--record). Off by default — these
+# add CLI surface non-technical users don't need and pull in `hound`.
+debug-tools = ["dep:hound"]
 
 [profile.release]
 lto = true

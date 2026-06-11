@@ -28,7 +28,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            model: "moonshine-base".into(),
+            model: "moonshine-tiny".into(),
             model_dir: "~/.local/share/my-voice/models".into(),
             quantized: true,
             threads: 0,
@@ -44,9 +44,6 @@ impl Default for Config {
     }
 }
 
-// Model resolution below is consumed by the transcriber factory in Phase 2;
-// defined and tested now so config.rs is complete.
-#[allow(dead_code)]
 /// Which transcription backend a resolved model path implies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Backend {
@@ -54,7 +51,6 @@ pub enum Backend {
     Whisper,
 }
 
-#[allow(dead_code)]
 /// A fully resolved model location plus the backend it maps to.
 #[derive(Debug, Clone)]
 pub struct ModelResolution {
@@ -122,7 +118,6 @@ impl Config {
     }
 
     /// Resolve `threads`: 0 = auto = min(num_cpus, 4). [voxtype]
-    #[allow(dead_code)]
     pub fn resolved_threads(&self) -> usize {
         if self.threads == 0 {
             num_cpus::get().min(4)
@@ -132,7 +127,6 @@ impl Config {
     }
 
     /// Tilde-expanded model storage directory.
-    #[allow(dead_code)]
     pub fn resolved_model_dir(&self) -> PathBuf {
         expand_tilde(&self.model_dir)
     }
@@ -172,7 +166,6 @@ impl Config {
     }
 
     /// Map `model` → backend + concrete path. Does not check existence.
-    #[allow(dead_code)]
     pub fn resolve_model(&self) -> ModelResolution {
         let m = &self.model;
         if m == "moonshine-tiny" || m == "moonshine-base" {
@@ -200,7 +193,6 @@ impl Config {
 
 /// Expand a leading `~` using `dirs::home_dir()` (not shellexpand). A bare `~`
 /// or `~/...` is expanded; everything else is returned unchanged.
-#[allow(dead_code)]
 pub fn expand_tilde(s: &str) -> PathBuf {
     if s == "~" {
         if let Some(home) = dirs::home_dir() {
@@ -223,7 +215,7 @@ mod tests {
         let cfg = Config::default();
         let toml = toml::to_string(&cfg).unwrap();
         let back: Config = toml::from_str(&toml).unwrap();
-        assert_eq!(back.model, "moonshine-base");
+        assert_eq!(back.model, "moonshine-tiny");
         assert_eq!(back.min_speech_ms, 300);
         assert_eq!(back.trailing_silence_ms, 150);
         assert!(back.quantized);
@@ -233,7 +225,7 @@ mod tests {
     fn partial_config_keeps_defaults() {
         let cfg: Config = toml::from_str("min_speech_ms = 500").unwrap();
         assert_eq!(cfg.min_speech_ms, 500);
-        assert_eq!(cfg.model, "moonshine-base"); // default preserved
+        assert_eq!(cfg.model, "moonshine-tiny"); // default preserved
     }
 
     #[test]
@@ -241,7 +233,7 @@ mod tests {
         let cfg = Config::default();
         let r = cfg.resolve_model();
         assert_eq!(r.backend, Backend::Moonshine);
-        assert!(r.path.ends_with("moonshine-base"));
+        assert!(r.path.ends_with("moonshine-tiny"));
     }
 
     #[test]

@@ -21,7 +21,7 @@ pub fn create(config: &Config) -> Result<Box<dyn Transcriber>> {
     match resolved.backend {
         Backend::Moonshine => {
             if !resolved.path.exists() {
-                eprintln!("model not found — downloading {}...", config.model);
+                tracing::info!("model not found — downloading {}...", config.model);
                 crate::download::run(config)?;
             }
             Ok(Box::new(moonshine::Moonshine::load(

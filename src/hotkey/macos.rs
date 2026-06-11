@@ -113,14 +113,13 @@ fn run_tap(clipboard_hotkey: bool, tx: Sender<HotkeyEvent>) {
     let tap = match tap {
         Ok(t) => t,
         Err(()) => {
-            eprintln!(
-                "error: could not create event tap.\n\
-                 Grant these permissions to the terminal (or binary) in:\n\
-                   System Settings → Privacy & Security → Input Monitoring\n\
-                   System Settings → Privacy & Security → Accessibility\n\
-                 Then restart my-voice."
+            error!("could not create CGEvent tap — Accessibility/Input Monitoring permission likely missing");
+            crate::notify::once(
+                crate::notify::ErrorKind::HotkeySetupNeeded,
+                "Permission needed",
+                "my-voice needs Accessibility and Input Monitoring permission. Open System Settings → Privacy & Security, find my-voice under each, and turn it on. Then quit and reopen my-voice.",
             );
-            std::process::exit(1);
+            return;
         }
     };
 
