@@ -169,12 +169,14 @@ fn run_wav(config: &Config, path: &std::path::Path) -> Result<()> {
         .chunks(ch)
         .map(|f| f.iter().sum::<f32>() / ch as f32)
         .collect();
-    let samples = audio::resample(&mono, spec.sample_rate, 16_000);
-    let peak = samples.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
+    let resampled = audio::resample(&mono, spec.sample_rate, 16_000);
+    let raw_peak = resampled.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
+    let samples = audio::process_capture(&resampled, 16_000);
     info!(
-        "wav: {:.2}s, {} Hz → 16 kHz, {ch} ch → mono, peak {peak:.3}",
+        "wav: {:.2}s, {} Hz → 16 kHz, {ch} ch → mono, raw peak {raw_peak:.3}, processed {:.2}s",
         mono.len() as f32 / spec.sample_rate as f32,
-        spec.sample_rate
+        spec.sample_rate,
+        samples.len() as f32 / 16_000.0
     );
     let mut transcriber = transcriber::create(config)?;
     let text = post_process(&transcriber.transcribe(&samples)?);

@@ -114,9 +114,7 @@ impl AudioRecorder {
         );
         // APM only supports 8/16/32/48 kHz; resample first to avoid pitch-shifted garbage.
         let resampled = resample(&raw, self.sample_rate, TARGET_RATE);
-        let mut processed = apply_audio_processing(&resampled, TARGET_RATE);
-        normalize_peak(&mut processed);
-        let processed = trim_silence(&processed, TARGET_RATE);
+        let processed = process_capture(&resampled, TARGET_RATE);
         (raw, self.sample_rate, processed)
     }
 
@@ -180,6 +178,16 @@ where
         let sum: f32 = frame.iter().map(|s| f32::from_sample(*s)).sum();
         b.push(sum / denom);
     }
+}
+
+/// Full capture post-processing chain on 16 kHz mono samples:
+/// WebRTC APM (NS + AGC2) → peak normalize → silence trim. The single entry
+/// point for both live capture (`stop_with_raw`) and the `--wav` debug path,
+/// so offline runs exercise exactly what the mic path produces.
+pub fn process_capture(samples: &[f32], sample_rate: u32) -> Vec<f32> {
+    let mut processed = apply_audio_processing(samples, sample_rate);
+    normalize_peak(&mut processed);
+    trim_silence(&processed, sample_rate)
 }
 
 /// Loudest sample lands here after normalization — leaves ~0.5 dB headroom so

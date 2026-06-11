@@ -53,8 +53,8 @@ jobs:
       - name: build --release
         run: cargo build --release
 
-  whisper:
-    name: build --features whisper (ubuntu)
+  wer:
+    name: WER regression (ubuntu, moonshine-tiny)
     runs-on: ubuntu-latest
 
     steps:
@@ -63,8 +63,8 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install cmake + C++ toolchain + ALSA
-        run: sudo apt-get install -y cmake g++ libasound2-dev
+      - name: Install system deps
+        run: sudo apt-get install -y libasound2-dev
 
       - name: Cache cargo registry + build
         uses: actions/cache@v4
@@ -73,8 +73,22 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ubuntu-whisper-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ubuntu-whisper-
+          key: ubuntu-wer-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ubuntu-wer-
 
-      - name: build --features whisper
-        run: cargo build --release --features whisper
+      - name: Cache model
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/my-voice/models/moonshine-tiny
+          key: model-tiny-${{ hashFiles('src/models.rs') }}
+
+      - name: Download moonshine-tiny
+        run: |
+          echo 'model = "moonshine-tiny"' > /tmp/wer-ci.toml
+          cargo run --features debug-tools -- --config /tmp/wer-ci.toml --download
+
+      - name: Run WER harness
+        env:
+          MY_VOICE_WER_MODEL: moonshine-tiny
+          MY_VOICE_WER_MAX: "0.5"
+        run: cargo test --features debug-tools --test wer -- --ignored --nocapture
