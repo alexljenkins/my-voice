@@ -32,7 +32,7 @@ impl Default for Config {
             model_dir: "~/.local/share/my-voice/models".into(),
             quantized: true,
             threads: 0,
-            load_timeout_secs: 300,
+            load_timeout_secs: 1800,
             hotkey: "CapsLock".into(),
             clipboard_hotkey: true,
             grab: true,
@@ -188,6 +188,7 @@ mod tests {
         let toml = toml::to_string(&cfg).unwrap();
         let back: Config = toml::from_str(&toml).unwrap();
         assert_eq!(back.model, "moonshine-streaming-medium");
+        assert_eq!(back.load_timeout_secs, 1800);
         assert_eq!(back.min_speech_ms, 300);
         assert_eq!(back.trailing_silence_ms, 150);
         assert!(back.quantized);

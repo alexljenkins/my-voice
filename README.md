@@ -171,7 +171,7 @@ model = "moonshine-streaming-medium"  # tiny | base | streaming-small | streamin
 model_dir = "~/.local/share/my-voice/models"
 quantized = true            # smaller, faster — negligible accuracy cost
 threads = 0                 # 0 = auto (up to 4)
-load_timeout_secs = 300     # idle eviction; -1 = never unload, 0 = reload every use
+load_timeout_secs = 1800    # idle eviction; -1 = never unload, 0 = reload every use
 hotkey = "CapsLock"         # evdev key name (Linux); macOS only supports CapsLock in v1
 clipboard_hotkey = true     # Shift+hotkey → clipboard
 grab = true                 # Linux: exclusive grab + virtual keyboard passthrough
