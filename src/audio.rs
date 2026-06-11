@@ -77,6 +77,12 @@ impl AudioRecorder {
                 err_fn,
                 None,
             ),
+            SampleFormat::U8 => self.device.build_input_stream(
+                &config,
+                move |data: &[u8], _| append_mono(&buf, data, channels, cap),
+                err_fn,
+                None,
+            ),
             other => return Err(anyhow!("unsupported sample format: {other:?}")),
         }
         .context("building input stream")?;

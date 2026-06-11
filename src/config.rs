@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+pub use crate::models::Backend;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -42,13 +44,6 @@ impl Default for Config {
             injection: "auto".into(),
         }
     }
-}
-
-/// Which transcription backend a resolved model path implies.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Backend {
-    Moonshine,
-    Whisper,
 }
 
 /// A fully resolved model location plus the backend it maps to.
@@ -150,43 +145,44 @@ impl Config {
     }
 
     /// True if the model files for the configured model are present on disk.
-    /// Checks for the encoder file specifically — the download creates the
-    /// directory before files land, so a dir-only check would race.
+    /// Uses the registry sentinel file; returns false for unknown/custom models.
     pub fn is_model_downloaded(&self) -> bool {
+        let Some(spec) = crate::models::find(&self.model) else {
+            return false;
+        };
         let dir = self.resolved_model_dir().join(&self.model);
         if !dir.is_dir() {
             return false;
         }
-        let encoder = if self.quantized {
-            "encoder_model_quantized.onnx"
+        let sentinel = if self.quantized {
+            spec.sentinel_quantized
         } else {
-            "encoder_model.onnx"
+            spec.sentinel_full
         };
-        dir.join(encoder).exists()
+        dir.join(sentinel).exists()
     }
 
     /// Map `model` → backend + concrete path. Does not check existence.
     pub fn resolve_model(&self) -> ModelResolution {
         let m = &self.model;
-        if m == "moonshine-tiny" || m == "moonshine-base" {
-            return ModelResolution {
-                backend: Backend::Moonshine,
-                path: self.resolved_model_dir().join(m),
+
+        // Registry lookup first — covers all named auto-downloadable models.
+        if let Some(spec) = crate::models::find(m) {
+            let base = self.resolved_model_dir().join(m);
+            // GGML models point to the file directly; ONNX models to a directory.
+            let path = match spec.backend {
+                Backend::Whisper => base.join(spec.sentinel_quantized),
+                _ => base,
             };
+            return ModelResolution { backend: spec.backend.clone(), path };
         }
 
+        // Custom / arbitrary paths: infer backend from extension or assume Moonshine.
         let path = expand_tilde(m);
-        if m.ends_with(".gguf") {
-            ModelResolution {
-                backend: Backend::Whisper,
-                path,
-            }
+        if m.ends_with(".gguf") || m.ends_with(".bin") {
+            ModelResolution { backend: Backend::Whisper, path }
         } else {
-            // Any other path → a Moonshine model directory.
-            ModelResolution {
-                backend: Backend::Moonshine,
-                path,
-            }
+            ModelResolution { backend: Backend::Moonshine, path }
         }
     }
 }

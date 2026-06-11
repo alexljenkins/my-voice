@@ -39,5 +39,8 @@ pub fn create(config: &Config) -> Result<Box<dyn Transcriber>> {
             "this binary was built without whisper support; rebuild with \
              --features whisper, or use a Moonshine model"
         ),
+        Backend::Parakeet => bail!(
+            "Parakeet transcriber is not yet implemented"
+        ),
     }
 }

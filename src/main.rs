@@ -4,6 +4,7 @@ mod download;
 mod hotkey;
 mod injector;
 mod model_cache;
+mod models;
 mod notify;
 mod text;
 mod transcriber;
@@ -13,9 +14,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-#[cfg(feature = "debug-tools")]
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
@@ -50,16 +50,10 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     wav: Option<PathBuf>,
 
-    /// Record from the mic, apply the full pipeline, save processed WAV to PATH
-    /// and a raw (pre-processing) WAV to <stem>_raw.wav. No model needed.
-    #[cfg(feature = "debug-tools")]
-    #[arg(long, value_name = "PATH")]
+    /// Save each recording to <DIR>/<timestamp>.wav (and _raw.wav) while running
+    /// the normal hold-to-talk flow. Press Ctrl+C when done collecting samples.
+    #[arg(long, value_name = "DIR")]
     record: Option<PathBuf>,
-
-    /// Recording duration in seconds for --record (default: 5).
-    #[cfg(feature = "debug-tools")]
-    #[arg(long, value_name = "SECS", default_value = "5")]
-    duration: u64,
 
     /// Print audio input device names and exit.
     #[arg(long)]
@@ -77,7 +71,7 @@ struct Cli {
 fn main() {
     let cli = Cli::parse();
     #[cfg(feature = "debug-tools")]
-    let debug_invocation = cli.test || cli.wav.is_some() || cli.record.is_some();
+    let debug_invocation = cli.test || cli.wav.is_some();
     #[cfg(not(feature = "debug-tools"))]
     let debug_invocation = false;
     let is_daemon = !cli.download && !debug_invocation && !cli.list_devices;
@@ -111,12 +105,7 @@ fn run(cli: Cli) -> Result<()> {
         return run_wav(&config, path);
     }
 
-    #[cfg(feature = "debug-tools")]
-    if let Some(path) = cli.record {
-        return run_record(&config, &path, cli.duration);
-    }
-
-    run_daemon(config, cli.config)
+    run_daemon(config, cli.config, cli.record)
 }
 
 /// Feed a wav file straight through the transcriber — isolates the inference
@@ -174,44 +163,6 @@ fn run_test(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Record for `duration` seconds, apply the full pipeline, write both the
-/// processed and raw WAVs. No model loading — pure capture benchmark tool.
-#[cfg(feature = "debug-tools")]
-fn run_record(config: &Config, output_path: &Path, duration_secs: u64) -> Result<()> {
-    let mut recorder = AudioRecorder::new(&config.audio_device)?;
-    info!("recording {}s for --record...", duration_secs);
-    recorder.start()?;
-    thread::sleep(Duration::from_secs(duration_secs));
-    let (raw_samples, raw_rate, processed) = recorder.stop_with_raw();
-
-    let duration_actual = processed.len() as f32 / recorder.target_rate() as f32;
-    let peak = processed.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
-
-    // Write processed WAV.
-    let processed_path = output_path.to_string_lossy();
-    write_wav(&processed, recorder.target_rate(), &processed_path)?;
-
-    // Derive raw path: <stem>_raw.wav next to the output file.
-    let raw_path = {
-        let stem = output_path
-            .file_stem()
-            .unwrap_or_default()
-            .to_string_lossy();
-        let parent = output_path.parent().unwrap_or_else(|| Path::new("."));
-        parent
-            .join(format!("{stem}_raw.wav"))
-            .to_string_lossy()
-            .into_owned()
-    };
-    write_wav(&raw_samples, raw_rate, &raw_path)?;
-
-    println!("duration:  {duration_actual:.2}s");
-    println!("peak:      {peak:.4}");
-    println!("processed: {processed_path}");
-    println!("raw:       {raw_path}");
-    Ok(())
-}
-
 /// A message into the daemon's single event loop. Hotkey listener, tray UI,
 /// and background download all feed this one channel.
 enum DaemonMsg {
@@ -222,7 +173,7 @@ enum DaemonMsg {
     DownloadFailed(String),
 }
 
-fn run_daemon(mut config: Config, config_path: Option<PathBuf>) -> Result<()> {
+fn run_daemon(mut config: Config, config_path: Option<PathBuf>, record_dir: Option<PathBuf>) -> Result<()> {
     let _lock = match single_instance::acquire() {
         Ok(l) => l,
         Err(e) => {
@@ -235,6 +186,12 @@ fn run_daemon(mut config: Config, config_path: Option<PathBuf>) -> Result<()> {
     };
 
     notify::init();
+
+    if let Some(ref dir) = record_dir {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("creating record dir {dir:?}"))?;
+        info!("recording mode: saving WAVs to {}", dir.display());
+    }
 
     let mut cache = ModelCache::new(&config);
     cache.start_evict_thread();
@@ -346,7 +303,26 @@ fn run_daemon(mut config: Config, config_path: Option<PathBuf>) -> Result<()> {
                 (State::Recording { clipboard_only }, HotkeyEvent::Release) => {
                     // PTT trailing buffer: catch the tail of the last word.
                     thread::sleep(trailing);
-                    let samples = recorder.stop();
+                    let samples = if let Some(ref dir) = record_dir {
+                        let (raw, raw_rate, processed) = recorder.stop_with_raw();
+                        let ts = SystemTime::now()
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        let proc_path = dir.join(format!("{ts}.wav"));
+                        let raw_path = dir.join(format!("{ts}_raw.wav"));
+                        if let Err(e) = write_wav(&processed, recorder.target_rate(), &proc_path.to_string_lossy()) {
+                            warn!("record save failed: {e}");
+                        } else {
+                            println!("saved: {}", proc_path.display());
+                        }
+                        if let Err(e) = write_wav(&raw, raw_rate, &raw_path.to_string_lossy()) {
+                            warn!("record raw save failed: {e}");
+                        }
+                        processed
+                    } else {
+                        recorder.stop()
+                    };
                     let clipboard_only = *clipboard_only;
                     ui.set_state(TrayState::Transcribing);
                     let inj: &mut dyn Injector = if clipboard_only {
@@ -572,23 +548,24 @@ fn save_config(config: &Config, path: Option<&Path>) {
 /// Build the tray menu state from the current config and available devices.
 fn build_tray_menu(config: &Config, audio_devices: &[String]) -> TrayMenuState {
     let model_dir = config.resolved_model_dir();
-    let known: &[(&str, &str)] = &[
-        ("moonshine-tiny", "Faster  •  moonshine-tiny"),
-        ("moonshine-base", "Accurate  •  moonshine-base"),
-    ];
-    let models = known
+    let models = models::MODELS
         .iter()
-        .map(|&(name, label)| {
-            let dir = model_dir.join(name);
-            // Mirror is_model_downloaded(): check for the encoder file, not just
-            // the dir, so the menu stays "not downloaded" while the download runs.
-            let downloaded = dir.is_dir()
-                && (dir.join("encoder_model_quantized.onnx").exists()
-                    || dir.join("encoder_model.onnx").exists());
+        .filter(|spec| {
+            // Hide whisper-feature models when the binary wasn't built with that feature.
+            if spec.whisper_feature { cfg!(feature = "whisper") } else { true }
+        })
+        .map(|spec| {
+            let dir = model_dir.join(spec.name);
+            let sentinel = if config.quantized {
+                spec.sentinel_quantized
+            } else {
+                spec.sentinel_full
+            };
+            let downloaded = dir.is_dir() && dir.join(sentinel).exists();
             ModelItem {
-                name: name.to_string(),
-                label: label.to_string(),
-                active: config.model == name,
+                name: spec.name.to_string(),
+                label: spec.label.to_string(),
+                active: config.model == spec.name,
                 downloaded,
             }
         })
@@ -680,7 +657,6 @@ fn handle_utterance(
 }
 
 /// Write 16 kHz mono f32 samples as a 16-bit PCM wav.
-#[cfg(feature = "debug-tools")]
 fn write_wav(samples: &[f32], rate: u32, path: &str) -> Result<()> {
     let spec = hound::WavSpec {
         channels: 1,

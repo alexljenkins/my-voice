@@ -34,7 +34,13 @@ Fix: sudo usermod -aG input $USER
 then re-login.";
 
 pub fn spawn(config: &Config, tx: Sender<HotkeyEvent>) -> Result<()> {
-    if std::env::var_os("DISPLAY").is_some() {
+    // Under Wayland, DISPLAY is still set (XWayland) and XGrabKey *succeeds*, but
+    // an X11 passive grab only receives keys routed to XWayland clients — when a
+    // native Wayland surface has focus the hotkey never reaches us. evdev grabs at
+    // the device layer, below the compositor, so it works regardless of focus.
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some()
+        || std::env::var_os("XDG_SESSION_TYPE").is_some_and(|v| v == "wayland");
+    if !wayland && std::env::var_os("DISPLAY").is_some() {
         match spawn_x11(config, tx.clone()) {
             Ok(()) => return Ok(()),
             Err(e) => warn!("X11 hotkey unavailable ({e:#}), falling back to evdev"),

@@ -1,13 +1,14 @@
 //! Linux text injection: session-aware chain with runtime demotion.
 //!
-//! Wayland: wtype → AT-SPI → ydotool → clipboard (arboard)
+//! Wayland: wtype → ydotool → clipboard (arboard)
 //! X11:     xdotool → AT-SPI → clipboard (arboard)
 //! Neither: clipboard (arboard; may fail without a display server)
 //!
-//! AT-SPI (GNOME's accessibility bus) slots in ahead of ydotool everywhere:
-//! it's enabled by default on Ubuntu GNOME and needs no install or elevated
-//! permissions. On GNOME Wayland `wtype` fails at runtime (Mutter blocks the
-//! virtual-keyboard protocol) and demotes to AT-SPI automatically.
+//! AT-SPI keyboard synthesis is X11-only. On Wayland, Mutter discards the events
+//! but the D-Bus call still returns Ok, so it can't be trusted (and would defeat
+//! the clipboard fallback) — it's excluded from the Wayland chain. On GNOME
+//! Wayland `wtype` is also blocked by Mutter; ydotool (uinput) is the only
+//! reliable typing path, otherwise injection demotes to clipboard.
 //!
 //! All external tools are spawned via Command argv — never through a shell,
 //! since transcribed text can contain quotes, `$`, backticks, anything.
@@ -304,11 +305,12 @@ fn build_auto_chain(session: Session) -> Vec<Box<dyn Injector>> {
     let mut chain: Vec<Box<dyn Injector>> = Vec::new();
     match session {
         Session::Wayland => {
+            // AT-SPI is deliberately NOT in the Wayland chain: Mutter silently
+            // drops synthesized key events, yet generate_keyboard_event still
+            // returns Ok — an unverifiable false success that would swallow every
+            // utterance and defeat the clipboard fallback. It stays X11-only.
             if binary_on_path("wtype") {
                 chain.push(Box::new(WtypeInjector));
-            }
-            if let Some(inj) = try_atspi() {
-                chain.push(inj);
             }
             if binary_on_path("ydotool") {
                 if let Some(socket) = find_ydotool_socket() {
