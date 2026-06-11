@@ -20,6 +20,9 @@ pub struct AudioRecorder {
     sample_rate: u32,
     buffer: Arc<Mutex<Vec<f32>>>,
     stream: Option<cpal::Stream>,
+    /// Invoked (from cpal's error callback thread) when the stream dies
+    /// mid-capture — e.g. the microphone is unplugged.
+    error_cb: Option<Arc<dyn Fn(String) + Send + Sync>>,
 }
 
 impl AudioRecorder {
@@ -41,7 +44,14 @@ impl AudioRecorder {
             sample_rate,
             buffer: Arc::new(Mutex::new(Vec::with_capacity(cap.min(16_000 * 60)))),
             stream: None,
+            error_cb: None,
         })
+    }
+
+    /// Register a callback fired when the input stream reports a fatal error
+    /// (device unplugged, server died). Called from cpal's callback thread.
+    pub fn on_error(&mut self, cb: impl Fn(String) + Send + Sync + 'static) {
+        self.error_cb = Some(Arc::new(cb));
     }
 
     /// Open the input stream and begin appending mono samples to the buffer.
@@ -56,7 +66,13 @@ impl AudioRecorder {
         let channels = self.channels;
         let cap = self.sample_rate as usize * MAX_SECONDS;
         let buf = self.buffer.clone();
-        let err_fn = |e| error!("audio stream error: {e}");
+        let cb = self.error_cb.clone();
+        let err_fn = move |e: cpal::StreamError| {
+            error!("audio stream error: {e}");
+            if let Some(cb) = &cb {
+                cb(e.to_string());
+            }
+        };
 
         let stream = match self.sample_format {
             SampleFormat::F32 => self.device.build_input_stream(
@@ -91,6 +107,12 @@ impl AudioRecorder {
         self.stream = Some(stream);
         debug!("recording started");
         Ok(())
+    }
+
+    /// Stop the stream and discard whatever was captured (no processing).
+    pub fn cancel(&mut self) {
+        self.stream = None;
+        self.buffer.lock().unwrap().clear();
     }
 
     /// Stop the stream and return 16 kHz mono f32 samples in [-1, 1].

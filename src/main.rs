@@ -212,6 +212,8 @@ enum DaemonMsg {
     DownloadProgress(u8),
     DownloadComplete,
     DownloadFailed(String),
+    /// The cpal input stream died mid-capture (mic unplugged, server gone).
+    AudioFailed(String),
     /// The keybind-capture subprocess committed a new hotkey to disk.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     HotkeyCaptured,
@@ -265,6 +267,8 @@ fn run_daemon(
     // One channel, two producers. The hotkey listener and tray each get their
     // own typed sender, forwarded into the merged stream the loop drains.
     let (daemon_tx, daemon_rx) = mpsc::channel::<DaemonMsg>();
+
+    register_audio_error_cb(&mut recorder, &daemon_tx);
 
     let (hk_tx, hk_rx) = mpsc::channel::<HotkeyEvent>();
     if let Err(e) = spawn_listener(&config, hk_tx) {
@@ -397,12 +401,39 @@ fn run_daemon(
                             &mut trailing,
                             &ui,
                             &audio_devices,
+                            &daemon_tx,
                         );
                     }
                 }
                 // Recording+Press (autorepeat dupe) and Idle+Release (stale): ignore.
                 _ => {}
             },
+            DaemonMsg::AudioFailed(e) => {
+                warn!("audio stream failed: {e}");
+                if let State::Recording { .. } = state {
+                    recorder.cancel();
+                    state = State::Idle;
+                    ui.set_state(TrayState::Error("Microphone disconnected".into()));
+                    notify::send(
+                        "Microphone disconnected",
+                        "Recording cancelled — the audio stream reported an error.",
+                    );
+                    if pending_reload {
+                        pending_reload = false;
+                        apply_reload(
+                            &mut config,
+                            config_path.as_deref(),
+                            &mut recorder,
+                            &mut typer,
+                            &mut cache,
+                            &mut trailing,
+                            &ui,
+                            &audio_devices,
+                            &daemon_tx,
+                        );
+                    }
+                }
+            }
             DaemonMsg::DownloadProgress(pct) => {
                 ui.set_state(TrayState::Downloading { pct });
             }
@@ -466,6 +497,7 @@ fn run_daemon(
                     &mut trailing,
                     &ui,
                     &audio_devices,
+                    &daemon_tx,
                 ),
                 State::Recording { .. } => pending_reload = true,
             },
@@ -509,6 +541,7 @@ fn run_daemon(
                         &mut trailing,
                         &ui,
                         &audio_devices,
+                        &daemon_tx,
                     ),
                     State::Recording { .. } => pending_reload = true,
                 }
@@ -573,6 +606,7 @@ fn apply_reload(
     trailing: &mut Duration,
     ui: &UiHandle,
     audio_devices: &[audio::AudioDevice],
+    daemon_tx: &mpsc::Sender<DaemonMsg>,
 ) {
     let new = match Config::load(config_path) {
         Ok(c) => c,
@@ -591,7 +625,10 @@ fn apply_reload(
     }
     if actions.recorder {
         match AudioRecorder::new(&new.audio_device) {
-            Ok(r) => *recorder = r,
+            Ok(r) => {
+                *recorder = r;
+                register_audio_error_cb(recorder, daemon_tx);
+            }
             Err(e) => warn!("could not switch audio device: {e:#}"),
         }
     }
@@ -613,6 +650,15 @@ fn apply_reload(
     *config = new;
     ui.set_state(TrayState::Ready);
     ui.set_menu(build_tray_menu(config, audio_devices));
+}
+
+/// Wire the recorder's stream-error callback into the daemon channel so a dying
+/// stream cancels the in-flight recording instead of transcribing garbage.
+fn register_audio_error_cb(recorder: &mut AudioRecorder, daemon_tx: &mpsc::Sender<DaemonMsg>) {
+    let tx = daemon_tx.clone();
+    recorder.on_error(move |e| {
+        let _ = tx.send(DaemonMsg::AudioFailed(e));
+    });
 }
 
 /// Persist config to disk; logs a warning on failure (non-fatal for the daemon).
