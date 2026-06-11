@@ -38,7 +38,10 @@ pub fn run(config: &Config) -> Result<()> {
     fs::create_dir_all(&dest).with_context(|| format!("creating {}", dest.display()))?;
 
     for &(remote, base) in files_for(spec, config.quantized) {
-        let url_display = format!("https://huggingface.co/{}/resolve/main/{remote}", spec.hf_repo);
+        let url_display = format!(
+            "https://huggingface.co/{}/resolve/main/{remote}",
+            spec.hf_repo
+        );
         eprintln!("downloading {url_display}");
         download_file(spec, remote, &dest.join(base), |done, _total| {
             eprint!("\r  {} KiB", done / 1024);
@@ -55,10 +58,7 @@ pub fn run(config: &Config) -> Result<()> {
 /// Fires [`DownloadEvent`]s through `on_event`. Callers should check
 /// `config.is_model_downloaded()` first; per-file downloads are still
 /// idempotent (skip if already present) so duplicate calls are safe.
-pub fn start_background(
-    config: Config,
-    on_event: impl Fn(DownloadEvent) + Send + 'static,
-) {
+pub fn start_background(config: Config, on_event: impl Fn(DownloadEvent) + Send + 'static) {
     std::thread::spawn(move || {
         match run_with_progress(&config, |pct| on_event(DownloadEvent::Progress(pct))) {
             Ok(()) => on_event(DownloadEvent::Complete),
@@ -118,7 +118,10 @@ fn download_file(
         return Ok(());
     }
 
-    let url = format!("https://huggingface.co/{}/resolve/main/{remote}", spec.hf_repo);
+    let url = format!(
+        "https://huggingface.co/{}/resolve/main/{remote}",
+        spec.hf_repo
+    );
     let resp = ureq::get(&url)
         .call()
         .with_context(|| format!("GET {url}"))?;

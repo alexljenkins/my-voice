@@ -129,14 +129,16 @@ impl AudioRecorder {
 /// Eliminates the resample step entirely on compatible hardware.
 fn select_stream_config(device: &cpal::Device) -> Result<(SampleFormat, usize, u32)> {
     if let Ok(mut configs) = device.supported_input_configs() {
-        if let Some(cfg) = configs.find(|c| {
-            c.min_sample_rate().0 <= TARGET_RATE && c.max_sample_rate().0 >= TARGET_RATE
-        }) {
+        if let Some(cfg) = configs
+            .find(|c| c.min_sample_rate().0 <= TARGET_RATE && c.max_sample_rate().0 >= TARGET_RATE)
+        {
             debug!("device supports 16 kHz natively — resample step skipped");
             return Ok((cfg.sample_format(), cfg.channels() as usize, TARGET_RATE));
         }
     }
-    let default = device.default_input_config().context("querying default input config")?;
+    let default = device
+        .default_input_config()
+        .context("querying default input config")?;
     Ok((
         default.sample_format(),
         default.channels() as usize,
@@ -219,14 +221,9 @@ fn resample_fft(samples: &[f32], from_rate: u32, to_rate: u32) -> Result<Vec<f32
     use rubato::{FftFixedOut, Resampler};
 
     const OUT_CHUNK: usize = 1600; // 100 ms at 16 kHz
-    let mut resampler = FftFixedOut::<f32>::new(
-        from_rate as usize,
-        to_rate as usize,
-        OUT_CHUNK,
-        2,
-        1,
-    )
-    .map_err(|e| anyhow!("rubato: {e}"))?;
+    let mut resampler =
+        FftFixedOut::<f32>::new(from_rate as usize, to_rate as usize, OUT_CHUNK, 2, 1)
+            .map_err(|e| anyhow!("rubato: {e}"))?;
 
     let expected = (samples.len() as f64 * to_rate as f64 / from_rate as f64).ceil() as usize;
     let mut out = Vec::with_capacity(expected);
@@ -291,7 +288,7 @@ pub fn apply_audio_processing(samples: &[f32], sample_rate: u32) -> Vec<f32> {
         }),
         gain_controller2: Some(GainController2 {
             adaptive_digital: Some(AdaptiveDigital {
-                headroom_db: 1.0, // target -1 dBFS; normalize_peak is the real ceiling
+                headroom_db: 1.0,  // target -1 dBFS; normalize_peak is the real ceiling
                 max_gain_db: 12.0, // quiet mics need headroom; NS before AGC limits noise amp
                 ..Default::default()
             }),
@@ -416,7 +413,10 @@ pub fn input_devices() -> Vec<AudioDevice> {
         // High-level server PCMs: keep, prettify, dedupe.
         if let Some(label) = high_level_label(name) {
             if !out.iter().any(|d| d.label == label) {
-                out.push(AudioDevice { value: name.clone(), label });
+                out.push(AudioDevice {
+                    value: name.clone(),
+                    label,
+                });
             }
             continue;
         }
@@ -426,7 +426,10 @@ pub fn input_devices() -> Vec<AudioDevice> {
                 continue;
             }
             seen_cards.push(card.to_string());
-            let label = card_names.get(card).cloned().unwrap_or_else(|| card.to_string());
+            let label = card_names
+                .get(card)
+                .cloned()
+                .unwrap_or_else(|| card.to_string());
             out.push(AudioDevice {
                 value: format!("plughw:CARD={card}"),
                 label,
@@ -464,7 +467,9 @@ fn card_friendly_names() -> std::collections::HashMap<String, String> {
     // Lines look like: ` 1 [Snowball       ]: USB-Audio - Blue Snowball`
     for line in text.lines() {
         let Some(open) = line.find('[') else { continue };
-        let Some(close) = line.find(']') else { continue };
+        let Some(close) = line.find(']') else {
+            continue;
+        };
         if close < open {
             continue;
         }

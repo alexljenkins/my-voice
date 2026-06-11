@@ -23,14 +23,14 @@ use super::{TrayMenuState, TrayState, UiCommand};
 
 /// 16×16 microphone silhouette. Each u16 is one row; bit 15 = col 0.
 const MIC_16: [u16; 16] = [
-    0x0000, 0x03C0, 0x07E0, 0x07E0, 0x07E0, 0x07E0, 0x03C0, 0x0180,
-    0x0FF0, 0x0180, 0x0180, 0x07E0, 0x0000, 0x0000, 0x0000, 0x0000,
+    0x0000, 0x03C0, 0x07E0, 0x07E0, 0x07E0, 0x07E0, 0x03C0, 0x0180, 0x0FF0, 0x0180, 0x0180, 0x07E0,
+    0x0000, 0x0000, 0x0000, 0x0000,
 ];
 
 /// 16×16 filled circle — the universal "recording" dot for the listening state.
 const CIRCLE_16: [u16; 16] = [
-    0x0000, 0x07E0, 0x1FF8, 0x3FFC, 0x7FFE, 0x7FFE, 0xFFFF, 0xFFFF,
-    0xFFFF, 0xFFFF, 0x7FFE, 0x7FFE, 0x3FFC, 0x1FF8, 0x07E0, 0x0000,
+    0x0000, 0x07E0, 0x1FF8, 0x3FFC, 0x7FFE, 0x7FFE, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x7FFE, 0x7FFE,
+    0x3FFC, 0x1FF8, 0x07E0, 0x0000,
 ];
 
 /// Build an ARGB32 `ksni::Icon` of `size`×`size` from a 16-row bitmap, scaled
@@ -55,15 +55,19 @@ fn make_icon(bitmap: &[u16; 16], size: usize, r: u8, g: u8, b: u8) -> ksni::Icon
             }
         }
     }
-    ksni::Icon { width: actual as i32, height: actual as i32, data }
+    ksni::Icon {
+        width: actual as i32,
+        height: actual as i32,
+        data,
+    }
 }
 
 /// (bitmap, color) for the tray icon in each state.
 fn state_icon(state: &TrayState) -> (&'static [u16; 16], (u8, u8, u8)) {
     match state {
-        TrayState::Ready => (&MIC_16, (170, 170, 170)),         // neutral grey mic
-        TrayState::Listening => (&CIRCLE_16, (230, 40, 40)),    // solid red record dot
-        TrayState::Transcribing => (&MIC_16, (235, 170, 0)),    // amber mic
+        TrayState::Ready => (&MIC_16, (170, 170, 170)), // neutral grey mic
+        TrayState::Listening => (&CIRCLE_16, (230, 40, 40)), // solid red record dot
+        TrayState::Transcribing => (&MIC_16, (235, 170, 0)), // amber mic
         TrayState::Downloading { .. } => (&MIC_16, (70, 150, 230)),
         TrayState::Error(_) => (&CIRCLE_16, (235, 150, 0)),
     }
@@ -163,7 +167,10 @@ impl ksni::Tray for MyVoiceTray {
 
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
         let (bitmap, (r, g, b)) = state_icon(&self.state);
-        vec![make_icon(bitmap, 16, r, g, b), make_icon(bitmap, 32, r, g, b)]
+        vec![
+            make_icon(bitmap, 16, r, g, b),
+            make_icon(bitmap, 32, r, g, b),
+        ]
     }
 
     fn menu(&self) -> Vec<Item> {
@@ -203,7 +210,14 @@ impl ksni::Tray for MyVoiceTray {
             model_submenu.push(MenuItem::Separator);
             model_submenu.push(hint_line(&format!("Downloading…  {pct}%")));
         }
-        items.push(SubMenu { label: "Model".into(), submenu: model_submenu, ..Default::default() }.into());
+        items.push(
+            SubMenu {
+                label: "Model".into(),
+                submenu: model_submenu,
+                ..Default::default()
+            }
+            .into(),
+        );
 
         // ── Microphone submenu ────────────────────────────────────────────────
         let active_device = self.menu.active_device.clone();
@@ -218,15 +232,30 @@ impl ksni::Tray for MyVoiceTray {
         for dev in &self.menu.audio_devices {
             let selected = dev.value == active_device && !active_device.is_empty();
             let value = dev.value.clone();
-            mic_items.push(option_row(dev.label.clone(), selected, true, move |this: &mut MyVoiceTray| {
-                let _ = this.cmd_tx.send(UiCommand::SetAudioDevice(value.clone()));
-            }));
+            mic_items.push(option_row(
+                dev.label.clone(),
+                selected,
+                true,
+                move |this: &mut MyVoiceTray| {
+                    let _ = this.cmd_tx.send(UiCommand::SetAudioDevice(value.clone()));
+                },
+            ));
         }
-        items.push(SubMenu { label: "Microphone".into(), submenu: mic_items, ..Default::default() }.into());
+        items.push(
+            SubMenu {
+                label: "Microphone".into(),
+                submenu: mic_items,
+                ..Default::default()
+            }
+            .into(),
+        );
 
         // ── Hotkeys submenu ───────────────────────────────────────────────────
         let mut hk_items: Vec<Item> = Vec::new();
-        hk_items.push(hint_line(&format!("Recording key:  {}", display_hotkey(&self.menu.hotkey))));
+        hk_items.push(hint_line(&format!(
+            "Recording key:  {}",
+            display_hotkey(&self.menu.hotkey)
+        )));
         hk_items.push(
             StandardItem {
                 label: "Set keybind…".into(),
@@ -264,8 +293,17 @@ impl ksni::Tray for MyVoiceTray {
             }
             .into(),
         );
-        hk_items.push(hint_line("Stops the key doing its normal job (e.g. Caps Lock)"));
-        items.push(SubMenu { label: "Hotkeys".into(), submenu: hk_items, ..Default::default() }.into());
+        hk_items.push(hint_line(
+            "Stops the key doing its normal job (e.g. Caps Lock)",
+        ));
+        items.push(
+            SubMenu {
+                label: "Hotkeys".into(),
+                submenu: hk_items,
+                ..Default::default()
+            }
+            .into(),
+        );
 
         // ── Paste mode submenu ────────────────────────────────────────────────
         let injection = self.menu.injection.clone();
@@ -285,7 +323,9 @@ impl ksni::Tray for MyVoiceTray {
             },
         ));
         if type_available {
-            paste_items.push(hint_line("Falls back to clipboard if the cursor can't take it"));
+            paste_items.push(hint_line(
+                "Falls back to clipboard if the cursor can't take it",
+            ));
         } else {
             paste_items.push(hint_line("Locked — needs a typing tool:"));
             for line in self.menu.inject_unlock_hint.lines() {
@@ -297,10 +337,19 @@ impl ksni::Tray for MyVoiceTray {
             clipboard_selected,
             true,
             |this: &mut MyVoiceTray| {
-                let _ = this.cmd_tx.send(UiCommand::SetInjection("clipboard".into()));
+                let _ = this
+                    .cmd_tx
+                    .send(UiCommand::SetInjection("clipboard".into()));
             },
         ));
-        items.push(SubMenu { label: "Paste mode".into(), submenu: paste_items, ..Default::default() }.into());
+        items.push(
+            SubMenu {
+                label: "Paste mode".into(),
+                submenu: paste_items,
+                ..Default::default()
+            }
+            .into(),
+        );
 
         items.push(MenuItem::Separator);
 

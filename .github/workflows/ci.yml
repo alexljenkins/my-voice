@@ -59,8 +59,8 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install cmake + C++ toolchain
-        run: sudo apt-get install -y cmake g++
+      - name: Install cmake + C++ toolchain + ALSA
+        run: sudo apt-get install -y cmake g++ libasound2-dev
 
       - name: Cache cargo registry + build
         uses: actions/cache@v4

@@ -215,7 +215,11 @@ enum DaemonMsg {
     HotkeyCaptured,
 }
 
-fn run_daemon(mut config: Config, config_path: Option<PathBuf>, record_dir: Option<PathBuf>) -> Result<()> {
+fn run_daemon(
+    mut config: Config,
+    config_path: Option<PathBuf>,
+    record_dir: Option<PathBuf>,
+) -> Result<()> {
     let _lock = match single_instance::acquire() {
         Ok(l) => l,
         Err(e) => {
@@ -230,8 +234,7 @@ fn run_daemon(mut config: Config, config_path: Option<PathBuf>, record_dir: Opti
     notify::init();
 
     if let Some(ref dir) = record_dir {
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("creating record dir {dir:?}"))?;
+        std::fs::create_dir_all(dir).with_context(|| format!("creating record dir {dir:?}"))?;
         info!("recording mode: saving WAVs to {}", dir.display());
     }
 
@@ -353,7 +356,11 @@ fn run_daemon(mut config: Config, config_path: Option<PathBuf>, record_dir: Opti
                             .unwrap_or(0);
                         let proc_path = dir.join(format!("{ts}.wav"));
                         let raw_path = dir.join(format!("{ts}_raw.wav"));
-                        if let Err(e) = write_wav(&processed, recorder.target_rate(), &proc_path.to_string_lossy()) {
+                        if let Err(e) = write_wav(
+                            &processed,
+                            recorder.target_rate(),
+                            &proc_path.to_string_lossy(),
+                        ) {
                             warn!("record save failed: {e}");
                         } else {
                             println!("saved: {}", proc_path.display());
@@ -401,7 +408,10 @@ fn run_daemon(mut config: Config, config_path: Option<PathBuf>, record_dir: Opti
                 info!("model download complete");
                 ui.set_state(TrayState::Ready);
                 ui.set_menu(build_tray_menu(&config, &audio_devices));
-                notify::send("Model ready", "Speech model downloaded. my-voice is ready to use.");
+                notify::send(
+                    "Model ready",
+                    "Speech model downloaded. my-voice is ready to use.",
+                );
             }
             DaemonMsg::DownloadFailed(e) => {
                 warn!("model download failed: {e}");
@@ -472,7 +482,12 @@ fn run_daemon(mut config: Config, config_path: Option<PathBuf>, record_dir: Opti
             // Settings changes that apply live (no restart needed). Write the
             // new value to disk so apply_reload detects the diff; defer if
             // mid-utterance, apply immediately otherwise.
-            DaemonMsg::Ui(cmd @ (UiCommand::SetModel(_) | UiCommand::SetAudioDevice(_) | UiCommand::SetInjection(_) | UiCommand::SetClipboardHotkey(_))) => {
+            DaemonMsg::Ui(
+                cmd @ (UiCommand::SetModel(_)
+                | UiCommand::SetAudioDevice(_)
+                | UiCommand::SetInjection(_)
+                | UiCommand::SetClipboardHotkey(_)),
+            ) => {
                 let mut updated = config.clone();
                 match cmd {
                     UiCommand::SetModel(m) => updated.model = m,
@@ -612,7 +627,11 @@ fn build_tray_menu(config: &Config, audio_devices: &[audio::AudioDevice]) -> Tra
         .iter()
         .filter(|spec| {
             // Hide whisper-feature models when the binary wasn't built with that feature.
-            if spec.whisper_feature { cfg!(feature = "whisper") } else { true }
+            if spec.whisper_feature {
+                cfg!(feature = "whisper")
+            } else {
+                true
+            }
         })
         .map(|spec| {
             let dir = model_dir.join(spec.name);
@@ -633,7 +652,10 @@ fn build_tray_menu(config: &Config, audio_devices: &[audio::AudioDevice]) -> Tra
 
     let devices = audio_devices
         .iter()
-        .map(|d| ui::DeviceItem { value: d.value.clone(), label: d.label.clone() })
+        .map(|d| ui::DeviceItem {
+            value: d.value.clone(),
+            label: d.label.clone(),
+        })
         .collect();
     let (inject_type_available, inject_unlock_hint) = injector::typing_availability();
 
@@ -789,10 +811,7 @@ fn write_wav(samples: &[f32], rate: u32, path: &str) -> Result<()> {
     Ok(())
 }
 
-fn init_tracing(
-    verbose: u8,
-    daemon: bool,
-) -> Option<tracing_appender::non_blocking::WorkerGuard> {
+fn init_tracing(verbose: u8, daemon: bool) -> Option<tracing_appender::non_blocking::WorkerGuard> {
     let make_filter = || {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| {
             let level = match verbose {
@@ -1002,7 +1021,10 @@ mod tests {
                 model: "moonshine-base".into(),
                 ..cfg()
             },
-            Config { threads: 2, ..cfg() },
+            Config {
+                threads: 2,
+                ..cfg()
+            },
             Config {
                 load_timeout_secs: 60,
                 ..cfg()

@@ -55,7 +55,9 @@ pub fn capture() -> anyhow::Result<Option<String>> {
 
     let font = load_font(); // None => text is skipped, capture still works.
     let mut app = CaptureApp::new(font);
-    event_loop.run_app(&mut app).context("run winit event loop")?;
+    event_loop
+        .run_app(&mut app)
+        .context("run winit event loop")?;
 
     if let Some(err) = app.error.take() {
         return Err(err);
@@ -152,13 +154,19 @@ impl ApplicationHandler for CaptureApp {
         let context = match softbuffer::Context::new(window.clone()) {
             Ok(c) => c,
             Err(e) => {
-                return self.fail(event_loop, anyhow!(e.to_string()).context("softbuffer context"))
+                return self.fail(
+                    event_loop,
+                    anyhow!(e.to_string()).context("softbuffer context"),
+                )
             }
         };
         let surface = match softbuffer::Surface::new(&context, window.clone()) {
             Ok(s) => s,
             Err(e) => {
-                return self.fail(event_loop, anyhow!(e.to_string()).context("softbuffer surface"))
+                return self.fail(
+                    event_loop,
+                    anyhow!(e.to_string()).context("softbuffer surface"),
+                )
             }
         };
 
@@ -166,12 +174,7 @@ impl ApplicationHandler for CaptureApp {
         self.surface = Some(surface);
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         if self.done {
             return;
         }
@@ -236,10 +239,7 @@ impl CaptureApp {
         let size = window.inner_size();
         let (w, h) = (size.width.max(1), size.height.max(1));
         surface
-            .resize(
-                NonZeroU32::new(w).unwrap(),
-                NonZeroU32::new(h).unwrap(),
-            )
+            .resize(NonZeroU32::new(w).unwrap(), NonZeroU32::new(h).unwrap())
             .map_err(|e| anyhow!(e.to_string()))?;
 
         let mut buf = surface.buffer_mut().map_err(|e| anyhow!(e.to_string()))?;

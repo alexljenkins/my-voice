@@ -47,22 +47,43 @@ pub static MODELS: &[ModelSpec] = &[
         backend: Backend::Moonshine,
         hf_repo: "onnx-community/moonshine-tiny-ONNX",
         files_quantized: &[
-            ("onnx/encoder_model_quantized.onnx", "encoder_model_quantized.onnx"),
-            ("onnx/decoder_model_merged_quantized.onnx", "decoder_model_merged_quantized.onnx"),
+            (
+                "onnx/encoder_model_quantized.onnx",
+                "encoder_model_quantized.onnx",
+            ),
+            (
+                "onnx/decoder_model_merged_quantized.onnx",
+                "decoder_model_merged_quantized.onnx",
+            ),
             ("tokenizer.json", "tokenizer.json"),
         ],
         files_full: &[
             ("onnx/encoder_model.onnx", "encoder_model.onnx"),
-            ("onnx/decoder_model_merged.onnx", "decoder_model_merged.onnx"),
+            (
+                "onnx/decoder_model_merged.onnx",
+                "decoder_model_merged.onnx",
+            ),
             ("tokenizer.json", "tokenizer.json"),
         ],
         sentinel_quantized: "encoder_model_quantized.onnx",
         sentinel_full: "encoder_model.onnx",
         checksums: &[
-            ("encoder_model_quantized.onnx", "c6fc4b7bc5af75c0591fd157a1f3829b533d18e9769a888fd95a62e470dd4f4a"),
-            ("decoder_model_merged_quantized.onnx", "eed87831c3a6103534aae7d47a5d485025c659a1323901513961c39fe8a1a367"),
-            ("encoder_model.onnx", "cbbf580f703b2af2137e0f6d14cd87f31cc67bd858bfd8715403a9489982d1a5"),
-            ("decoder_model_merged.onnx", "4131cef00b62942e9cdef691101f2cc7dbbcd828d71eee8c6c46c28fd051d6cb"),
+            (
+                "encoder_model_quantized.onnx",
+                "c6fc4b7bc5af75c0591fd157a1f3829b533d18e9769a888fd95a62e470dd4f4a",
+            ),
+            (
+                "decoder_model_merged_quantized.onnx",
+                "eed87831c3a6103534aae7d47a5d485025c659a1323901513961c39fe8a1a367",
+            ),
+            (
+                "encoder_model.onnx",
+                "cbbf580f703b2af2137e0f6d14cd87f31cc67bd858bfd8715403a9489982d1a5",
+            ),
+            (
+                "decoder_model_merged.onnx",
+                "4131cef00b62942e9cdef691101f2cc7dbbcd828d71eee8c6c46c28fd051d6cb",
+            ),
         ],
         whisper_feature: false,
     },
@@ -72,22 +93,43 @@ pub static MODELS: &[ModelSpec] = &[
         backend: Backend::Moonshine,
         hf_repo: "onnx-community/moonshine-base-ONNX",
         files_quantized: &[
-            ("onnx/encoder_model_quantized.onnx", "encoder_model_quantized.onnx"),
-            ("onnx/decoder_model_merged_quantized.onnx", "decoder_model_merged_quantized.onnx"),
+            (
+                "onnx/encoder_model_quantized.onnx",
+                "encoder_model_quantized.onnx",
+            ),
+            (
+                "onnx/decoder_model_merged_quantized.onnx",
+                "decoder_model_merged_quantized.onnx",
+            ),
             ("tokenizer.json", "tokenizer.json"),
         ],
         files_full: &[
             ("onnx/encoder_model.onnx", "encoder_model.onnx"),
-            ("onnx/decoder_model_merged.onnx", "decoder_model_merged.onnx"),
+            (
+                "onnx/decoder_model_merged.onnx",
+                "decoder_model_merged.onnx",
+            ),
             ("tokenizer.json", "tokenizer.json"),
         ],
         sentinel_quantized: "encoder_model_quantized.onnx",
         sentinel_full: "encoder_model.onnx",
         checksums: &[
-            ("encoder_model_quantized.onnx", "1dd9ab0a7f987113d30affcba5a068d11c8f90fa0223caa3e491ade431ad9751"),
-            ("decoder_model_merged_quantized.onnx", "cc9f3cd6698a369c6008b41aa60aa3fb3322e7f03c9bdf19d8e6b7200afca4f3"),
-            ("encoder_model.onnx", "153e128e7abd64a74ee47f2c3f585c3171c4d46cbb368b032827934c4e01e779"),
-            ("decoder_model_merged.onnx", "58778763ca8438963190244d6b26572bdca2cedec56a4b91e828f3f2d69ef3c5"),
+            (
+                "encoder_model_quantized.onnx",
+                "1dd9ab0a7f987113d30affcba5a068d11c8f90fa0223caa3e491ade431ad9751",
+            ),
+            (
+                "decoder_model_merged_quantized.onnx",
+                "cc9f3cd6698a369c6008b41aa60aa3fb3322e7f03c9bdf19d8e6b7200afca4f3",
+            ),
+            (
+                "encoder_model.onnx",
+                "153e128e7abd64a74ee47f2c3f585c3171c4d46cbb368b032827934c4e01e779",
+            ),
+            (
+                "decoder_model_merged.onnx",
+                "58778763ca8438963190244d6b26572bdca2cedec56a4b91e828f3f2d69ef3c5",
+            ),
         ],
         whisper_feature: false,
     },

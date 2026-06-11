@@ -73,10 +73,17 @@ fn spawn_x11(config: &Config, tx: Sender<HotkeyEvent>) -> Result<()> {
     // → grab only the specific combo (so e.g. plain `.` still types), once per
     // lock-state variant so CapsLock/NumLock don't defeat the grab.
     if mods == super::Mods::default() {
-        conn.grab_key(false, root, ModMask::ANY, keycode, GrabMode::ASYNC, GrabMode::ASYNC)
-            .map_err(|e| anyhow!("grab_key request: {e}"))?
-            .check()
-            .map_err(|e| anyhow!("grab_key rejected by X server (key already grabbed?): {e}"))?;
+        conn.grab_key(
+            false,
+            root,
+            ModMask::ANY,
+            keycode,
+            GrabMode::ASYNC,
+            GrabMode::ASYNC,
+        )
+        .map_err(|e| anyhow!("grab_key request: {e}"))?
+        .check()
+        .map_err(|e| anyhow!("grab_key rejected by X server (key already grabbed?): {e}"))?;
     } else {
         let mut base = ModMask::from(0u16);
         if mods.ctrl {
@@ -98,10 +105,17 @@ fn spawn_x11(config: &Config, tx: Sender<HotkeyEvent>) -> Result<()> {
             ModMask::LOCK | ModMask::M2,
         ];
         for v in lock_variants {
-            conn.grab_key(false, root, base | v, keycode, GrabMode::ASYNC, GrabMode::ASYNC)
-                .map_err(|e| anyhow!("grab_key request: {e}"))?
-                .check()
-                .map_err(|e| anyhow!("grab_key rejected (combo already grabbed?): {e}"))?;
+            conn.grab_key(
+                false,
+                root,
+                base | v,
+                keycode,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+            )
+            .map_err(|e| anyhow!("grab_key request: {e}"))?
+            .check()
+            .map_err(|e| anyhow!("grab_key rejected (combo already grabbed?): {e}"))?;
         }
     }
 
@@ -408,8 +422,7 @@ fn run_device(
                 match ev.value() {
                     1 if required.satisfied_by(&held) => {
                         active = true;
-                        let clipboard_only =
-                            clipboard_hotkey && held.shift && !required.shift;
+                        let clipboard_only = clipboard_hotkey && held.shift && !required.shift;
                         if tx.send(HotkeyEvent::Press { clipboard_only }).is_err() {
                             return;
                         }
@@ -543,16 +556,42 @@ fn resolve_alnum(n: &str) -> Option<Key> {
         return None;
     }
     Some(match c {
-        'A' => Key::KEY_A, 'B' => Key::KEY_B, 'C' => Key::KEY_C, 'D' => Key::KEY_D,
-        'E' => Key::KEY_E, 'F' => Key::KEY_F, 'G' => Key::KEY_G, 'H' => Key::KEY_H,
-        'I' => Key::KEY_I, 'J' => Key::KEY_J, 'K' => Key::KEY_K, 'L' => Key::KEY_L,
-        'M' => Key::KEY_M, 'N' => Key::KEY_N, 'O' => Key::KEY_O, 'P' => Key::KEY_P,
-        'Q' => Key::KEY_Q, 'R' => Key::KEY_R, 'S' => Key::KEY_S, 'T' => Key::KEY_T,
-        'U' => Key::KEY_U, 'V' => Key::KEY_V, 'W' => Key::KEY_W, 'X' => Key::KEY_X,
-        'Y' => Key::KEY_Y, 'Z' => Key::KEY_Z,
-        '0' => Key::KEY_0, '1' => Key::KEY_1, '2' => Key::KEY_2, '3' => Key::KEY_3,
-        '4' => Key::KEY_4, '5' => Key::KEY_5, '6' => Key::KEY_6, '7' => Key::KEY_7,
-        '8' => Key::KEY_8, '9' => Key::KEY_9,
+        'A' => Key::KEY_A,
+        'B' => Key::KEY_B,
+        'C' => Key::KEY_C,
+        'D' => Key::KEY_D,
+        'E' => Key::KEY_E,
+        'F' => Key::KEY_F,
+        'G' => Key::KEY_G,
+        'H' => Key::KEY_H,
+        'I' => Key::KEY_I,
+        'J' => Key::KEY_J,
+        'K' => Key::KEY_K,
+        'L' => Key::KEY_L,
+        'M' => Key::KEY_M,
+        'N' => Key::KEY_N,
+        'O' => Key::KEY_O,
+        'P' => Key::KEY_P,
+        'Q' => Key::KEY_Q,
+        'R' => Key::KEY_R,
+        'S' => Key::KEY_S,
+        'T' => Key::KEY_T,
+        'U' => Key::KEY_U,
+        'V' => Key::KEY_V,
+        'W' => Key::KEY_W,
+        'X' => Key::KEY_X,
+        'Y' => Key::KEY_Y,
+        'Z' => Key::KEY_Z,
+        '0' => Key::KEY_0,
+        '1' => Key::KEY_1,
+        '2' => Key::KEY_2,
+        '3' => Key::KEY_3,
+        '4' => Key::KEY_4,
+        '5' => Key::KEY_5,
+        '6' => Key::KEY_6,
+        '7' => Key::KEY_7,
+        '8' => Key::KEY_8,
+        '9' => Key::KEY_9,
         _ => return None,
     })
 }
@@ -660,7 +699,13 @@ mod tests {
         use super::super::{parse_hotkey, Mods};
         let (mods, main) = parse_hotkey("Ctrl+Period");
         assert_eq!(main, "Period");
-        assert_eq!(mods, Mods { ctrl: true, ..Default::default() });
+        assert_eq!(
+            mods,
+            Mods {
+                ctrl: true,
+                ..Default::default()
+            }
+        );
 
         let (mods, main) = parse_hotkey("Ctrl+Shift+K");
         assert_eq!(main, "K");
@@ -674,8 +719,15 @@ mod tests {
     #[test]
     fn mods_satisfied_subset() {
         use super::super::Mods;
-        let required = Mods { ctrl: true, ..Default::default() };
-        let held = Mods { ctrl: true, shift: true, ..Default::default() };
+        let required = Mods {
+            ctrl: true,
+            ..Default::default()
+        };
+        let held = Mods {
+            ctrl: true,
+            shift: true,
+            ..Default::default()
+        };
         assert!(required.satisfied_by(&held)); // extra Shift is allowed
         assert!(!required.satisfied_by(&Mods::default())); // Ctrl missing
     }

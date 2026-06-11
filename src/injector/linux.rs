@@ -310,11 +310,20 @@ pub fn typing_availability() -> (bool, String) {
         Session::Wayland => {
             let available = binary_on_path("wtype")
                 || (binary_on_path("ydotool") && find_ydotool_socket().is_some());
-            (available, format!("Install a typing tool to enable:\n{}", install_cmd("wtype")))
+            (
+                available,
+                format!("Install a typing tool to enable:\n{}", install_cmd("wtype")),
+            )
         }
         Session::X11 => {
             let available = binary_on_path("xdotool") || try_atspi().is_some();
-            (available, format!("Install a typing tool to enable:\n{}", install_cmd("xdotool")))
+            (
+                available,
+                format!(
+                    "Install a typing tool to enable:\n{}",
+                    install_cmd("xdotool")
+                ),
+            )
         }
         Session::None => (
             false,

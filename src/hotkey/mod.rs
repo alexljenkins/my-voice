@@ -39,7 +39,11 @@ impl Mods {
 /// `"Ctrl+Period"` → (`{ctrl}`, `"Period"`); `"CapsLock"` → (`{}`, `"CapsLock"`).
 pub fn parse_hotkey(s: &str) -> (Mods, &str) {
     let mut mods = Mods::default();
-    let parts: Vec<&str> = s.split('+').map(str::trim).filter(|p| !p.is_empty()).collect();
+    let parts: Vec<&str> = s
+        .split('+')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
     let Some((main, modifiers)) = parts.split_last() else {
         return (mods, s);
     };

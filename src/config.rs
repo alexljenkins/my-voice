@@ -139,8 +139,7 @@ impl Config {
                 .with_context(|| format!("creating config dir {}", parent.display()))?;
         }
         let toml = toml::to_string_pretty(self).context("serializing config")?;
-        std::fs::write(&p, &toml)
-            .with_context(|| format!("writing config {}", p.display()))?;
+        std::fs::write(&p, &toml).with_context(|| format!("writing config {}", p.display()))?;
         Ok(())
     }
 
@@ -174,15 +173,24 @@ impl Config {
                 Backend::Whisper => base.join(spec.sentinel_quantized),
                 _ => base,
             };
-            return ModelResolution { backend: spec.backend.clone(), path };
+            return ModelResolution {
+                backend: spec.backend.clone(),
+                path,
+            };
         }
 
         // Custom / arbitrary paths: infer backend from extension or assume Moonshine.
         let path = expand_tilde(m);
         if m.ends_with(".gguf") || m.ends_with(".bin") {
-            ModelResolution { backend: Backend::Whisper, path }
+            ModelResolution {
+                backend: Backend::Whisper,
+                path,
+            }
         } else {
-            ModelResolution { backend: Backend::Moonshine, path }
+            ModelResolution {
+                backend: Backend::Moonshine,
+                path,
+            }
         }
     }
 }
