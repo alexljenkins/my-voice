@@ -2,3 +2,4 @@
 _*.md
 graphify-out
 *.wav
+!/samples/*.wav
