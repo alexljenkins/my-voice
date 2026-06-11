@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context, Result};
-use ort::session::{Session, SessionInputValue};
-use ort::value::{Tensor, ValueType};
+use ort::session::{Session, SessionInputValue, SessionOutputs};
+use ort::value::{DynValue, Tensor, ValueType};
 use tokenizers::Tokenizer;
 use tracing::{debug, info, warn};
 
@@ -28,6 +28,8 @@ use crate::config::Config;
 
 const DECODER_START_TOKEN_ID: i64 = 1;
 const EOS_TOKEN_ID: i64 = 2;
+/// Streaming encoders reshape the waveform into 80-sample (5 ms) frames.
+const STREAMING_FRAME: usize = 80;
 const MAX_TOKENS_PER_SECOND: f32 = 8.0;
 const ABSOLUTE_MAX_TOKENS: usize = 512;
 const SAMPLE_RATE: f32 = 16_000.0;
@@ -177,27 +179,33 @@ impl Moonshine {
         })
     }
 
-    /// Raw waveform `[1, len]` → encoder hidden states `(shape, data)`.
-    fn run_encoder(&mut self, audio: &[f32]) -> Result<(Vec<i64>, Vec<f32>)> {
+    /// Raw waveform `[1, len]` → encoder hidden states, kept as an owned ort
+    /// value so decode steps can feed it back as a view without copying.
+    fn run_encoder(&mut self, audio: &[f32]) -> Result<DynValue> {
+        // The streaming encoder reshapes the waveform into 80-sample (5 ms)
+        // frames and rejects lengths that don't divide evenly. Zero-pad the
+        // tail; <5 ms of silence on audio that already ends in silence.
+        let mut samples = audio.to_vec();
+        if self.encoder_mask_input.is_some() {
+            samples.resize(audio.len().next_multiple_of(STREAMING_FRAME), 0.0);
+        }
+        let len = samples.len();
         let mut inputs: Vec<(Cow<str>, SessionInputValue)> = vec![(
             Cow::Borrowed(self.encoder_input_name.as_str()),
-            Tensor::<f32>::from_array(([1usize, audio.len()], audio.to_vec()))
+            Tensor::<f32>::from_array(([1usize, len], samples))
                 .ort()?
                 .into(),
         )];
         if let Some(mask) = &self.encoder_mask_input {
             inputs.push((
                 Cow::Borrowed(mask.as_str()),
-                Tensor::<i64>::from_array(([1usize, audio.len()], vec![1i64; audio.len()]))
+                Tensor::<i64>::from_array(([1usize, len], vec![1i64; len]))
                     .ort()?
                     .into(),
             ));
         }
-        let out = self.encoder.run(inputs).ort()?;
-        let (shape, data) = out[self.encoder_output_name.as_str()]
-            .try_extract_tensor::<f32>()
-            .ort()?;
-        Ok((shape.to_vec(), data.to_vec()))
+        let mut out = self.encoder.run(inputs).ort()?;
+        take_output(&mut out, &self.encoder_output_name)
     }
 }
 
@@ -212,7 +220,7 @@ impl Transcriber for Moonshine {
         let max_tokens = compute_max_tokens(audio.len());
 
         let t_enc = Instant::now();
-        let (enc_shape, enc_data) = self.run_encoder(audio)?;
+        let enc = self.run_encoder(audio)?;
         let encode_ms = t_enc.elapsed().as_millis();
 
         let t_dec = Instant::now();
@@ -227,8 +235,7 @@ impl Transcriber for Moonshine {
                 head_dim,
             } => decode_merged(
                 session,
-                &enc_shape,
-                &enc_data,
+                &enc,
                 max_tokens,
                 decoder_kv_input_names,
                 encoder_kv_input_names,
@@ -241,9 +248,7 @@ impl Transcriber for Moonshine {
                 initial,
                 with_past,
                 n_layers,
-            } => decode_split(
-                initial, with_past, *n_layers, &enc_shape, &enc_data, max_tokens,
-            )?,
+            } => decode_split(initial, with_past, *n_layers, &enc, max_tokens)?,
         };
         let decode_ms = t_dec.elapsed().as_millis();
 
@@ -263,11 +268,14 @@ impl Transcriber for Moonshine {
 }
 
 /// Greedy decode over the merged decoder (`use_cache_branch`).
+///
+/// KV tensors are moved between steps as owned ort values (no extract/copy
+/// round-trip); the encoder hidden states and the static cross-attention KV
+/// are fed as views of values held outside the loop.
 #[allow(clippy::too_many_arguments)]
 fn decode_merged(
     decoder: &mut Session,
-    enc_shape: &[i64],
-    enc_data: &[f32],
+    enc: &DynValue,
     max_tokens: usize,
     decoder_kv_input_names: &[String],
     encoder_kv_input_names: &[String],
@@ -276,14 +284,18 @@ fn decode_merged(
     num_heads: usize,
     head_dim: usize,
 ) -> Result<Vec<i64>> {
-    let dummy = vec![0.0f32; num_heads * head_dim];
-    let dummy_shape = [1usize, num_heads, 1usize, head_dim];
+    let dummy = Tensor::<f32>::from_array((
+        [1usize, num_heads, 1usize, head_dim],
+        vec![0.0f32; num_heads * head_dim],
+    ))
+    .ort()?;
 
     let mut tokens = vec![DECODER_START_TOKEN_ID];
+    let mut hit_eos = false;
     // Previous step's `present.*.decoder.*` (feeds next `past_key_values`), and
     // the `present.*.encoder.*` captured at step 0 and reused forever.
-    let mut past_decoder: Vec<(Vec<i64>, Vec<f32>)> = Vec::new();
-    let mut encoder_kv: Vec<(Vec<i64>, Vec<f32>)> = Vec::new();
+    let mut past_decoder: Vec<DynValue> = Vec::new();
+    let mut encoder_kv: Vec<DynValue> = Vec::new();
 
     for step in 0..max_tokens {
         let mut inputs: Vec<(Cow<str>, SessionInputValue)> = Vec::new();
@@ -300,33 +312,25 @@ fn decode_merged(
                 .ort()?
                 .into(),
         ));
-        inputs.push((
-            Cow::Borrowed("encoder_hidden_states"),
-            Tensor::<f32>::from_array((enc_shape.to_vec(), enc_data.to_vec()))
-                .ort()?
-                .into(),
-        ));
+        inputs.push((Cow::Borrowed("encoder_hidden_states"), enc.into()));
 
-        // Decoder-side KV: dummy zeros at step 0, else previous present.
-        for (i, name) in decoder_kv_input_names.iter().enumerate() {
-            let tensor = if step == 0 {
-                Tensor::<f32>::from_array((dummy_shape, dummy.clone())).ort()?
-            } else {
-                let (sh, d) = &past_decoder[i];
-                Tensor::<f32>::from_array((sh.clone(), d.clone())).ort()?
-            };
-            inputs.push((Cow::Borrowed(name.as_str()), tensor.into()));
-        }
-        // Encoder-side (cross-attention) KV: dummy at step 0, else the values
-        // captured at step 0 — the merged model emits empty encoder KV later.
-        for (i, name) in encoder_kv_input_names.iter().enumerate() {
-            let tensor = if step == 0 {
-                Tensor::<f32>::from_array((dummy_shape, dummy.clone())).ort()?
-            } else {
-                let (sh, d) = &encoder_kv[i];
-                Tensor::<f32>::from_array((sh.clone(), d.clone())).ort()?
-            };
-            inputs.push((Cow::Borrowed(name.as_str()), tensor.into()));
+        // Decoder-side KV: dummy zeros at step 0, else previous present (moved).
+        // Encoder-side (cross-attention) KV: dummy at step 0, else views of the
+        // values captured at step 0 — the merged model emits empty encoder KV later.
+        if step == 0 {
+            for name in decoder_kv_input_names.iter().chain(encoder_kv_input_names) {
+                inputs.push((Cow::Borrowed(name.as_str()), (&dummy).into()));
+            }
+        } else {
+            for (name, v) in decoder_kv_input_names
+                .iter()
+                .zip(std::mem::take(&mut past_decoder))
+            {
+                inputs.push((Cow::Borrowed(name.as_str()), v.into()));
+            }
+            for (name, v) in encoder_kv_input_names.iter().zip(&encoder_kv) {
+                inputs.push((Cow::Borrowed(name.as_str()), v.into()));
+            }
         }
 
         inputs.push((
@@ -336,48 +340,56 @@ fn decode_merged(
                 .into(),
         ));
 
-        let outputs = decoder.run(inputs).ort()?;
+        let mut outputs = decoder.run(inputs).ort()?;
 
         let (lshape, logits) = outputs["logits"].try_extract_tensor::<f32>().ort()?;
         let vocab = *lshape.last().context("logits has no dims")? as usize;
         let next = argmax(&logits[logits.len() - vocab..]);
         if next == EOS_TOKEN_ID {
+            hit_eos = true;
             break;
         }
         tokens.push(next);
+        if truncate_loop(&mut tokens) {
+            debug!("repetition loop detected at step {step}; truncating");
+            break;
+        }
 
-        // Capture KV for the next step while `outputs` is still alive.
-        let mut next_decoder = Vec::with_capacity(decoder_kv_output_names.len());
-        for name in decoder_kv_output_names {
-            let (sh, d) = outputs[name.as_str()].try_extract_tensor::<f32>().ort()?;
-            next_decoder.push((sh.to_vec(), d.to_vec()));
-        }
+        // Take KV for the next step out of the outputs (owned, no copy).
+        past_decoder = decoder_kv_output_names
+            .iter()
+            .map(|n| take_output(&mut outputs, n))
+            .collect::<Result<_>>()?;
         if step == 0 {
-            for name in encoder_kv_output_names {
-                let (sh, d) = outputs[name.as_str()].try_extract_tensor::<f32>().ort()?;
-                encoder_kv.push((sh.to_vec(), d.to_vec()));
-            }
+            encoder_kv = encoder_kv_output_names
+                .iter()
+                .map(|n| take_output(&mut outputs, n))
+                .collect::<Result<_>>()?;
         }
-        drop(outputs);
-        past_decoder = next_decoder;
+    }
+    if !hit_eos && collapse_runaway(&mut tokens) {
+        debug!("runaway decode collapsed to {} tokens", tokens.len() - 1);
     }
     Ok(tokens)
 }
 
 /// Greedy decode over the split (no-past + with-past) streaming decoder.
+///
+/// Self-attn KV is moved between steps as owned ort values; the static
+/// cross-attn KV and encoder hidden states are fed as views.
 fn decode_split(
     initial: &mut Session,
     with_past: &mut Session,
     n_layers: usize,
-    enc_shape: &[i64],
-    enc_data: &[f32],
+    enc: &DynValue,
     max_tokens: usize,
 ) -> Result<Vec<i64>> {
     let mut tokens = vec![DECODER_START_TOKEN_ID];
+    let mut hit_eos = false;
     // Self-attn KV, length 2*n_layers as key0,val0,key1,val1,…; grows each step.
-    let mut past_self: Vec<(Vec<i64>, Vec<f32>)> = Vec::new();
+    let mut past_self: Vec<DynValue> = Vec::new();
     // Cross-attn KV: static, captured at step 0, fed back every later step.
-    let mut cross_kv: Vec<(Vec<i64>, Vec<f32>)> = Vec::new();
+    let mut cross_kv: Vec<DynValue> = Vec::new();
 
     for step in 0..max_tokens {
         let last = *tokens.last().unwrap();
@@ -388,47 +400,21 @@ fn decode_split(
                     .ort()?
                     .into(),
             ),
-            (
-                Cow::Borrowed("encoder_hidden_states"),
-                Tensor::<f32>::from_array((enc_shape.to_vec(), enc_data.to_vec()))
-                    .ort()?
-                    .into(),
-            ),
+            (Cow::Borrowed("encoder_hidden_states"), enc.into()),
         ];
 
-        let outputs = if step == 0 {
+        let mut outputs = if step == 0 {
             initial.run(inputs).ort()?
         } else {
-            for i in 0..n_layers {
-                let (sk, dk) = &past_self[2 * i];
-                let (sv, dv) = &past_self[2 * i + 1];
-                inputs.push((
-                    Cow::Owned(format!("past_self_key_{i}")),
-                    Tensor::<f32>::from_array((sk.clone(), dk.clone()))
-                        .ort()?
-                        .into(),
-                ));
-                inputs.push((
-                    Cow::Owned(format!("past_self_value_{i}")),
-                    Tensor::<f32>::from_array((sv.clone(), dv.clone()))
-                        .ort()?
-                        .into(),
-                ));
+            for (i, v) in std::mem::take(&mut past_self).into_iter().enumerate() {
+                let kind = if i % 2 == 0 { "key" } else { "value" };
+                inputs.push((Cow::Owned(format!("past_self_{kind}_{}", i / 2)), v.into()));
             }
-            for i in 0..n_layers {
-                let (sk, dk) = &cross_kv[2 * i];
-                let (sv, dv) = &cross_kv[2 * i + 1];
+            for (i, v) in cross_kv.iter().enumerate() {
+                let kind = if i % 2 == 0 { "key" } else { "value" };
                 inputs.push((
-                    Cow::Owned(format!("present_cross_key_{i}_orig")),
-                    Tensor::<f32>::from_array((sk.clone(), dk.clone()))
-                        .ort()?
-                        .into(),
-                ));
-                inputs.push((
-                    Cow::Owned(format!("present_cross_value_{i}_orig")),
-                    Tensor::<f32>::from_array((sv.clone(), dv.clone()))
-                        .ort()?
-                        .into(),
+                    Cow::Owned(format!("present_cross_{kind}_{}_orig", i / 2)),
+                    v.into(),
                 ));
             }
             with_past.run(inputs).ort()?
@@ -438,39 +424,107 @@ fn decode_split(
         let vocab = *lshape.last().context("logits has no dims")? as usize;
         let next = argmax(&logits[logits.len() - vocab..]);
         if next == EOS_TOKEN_ID {
+            hit_eos = true;
             break;
         }
         tokens.push(next);
+        if truncate_loop(&mut tokens) {
+            debug!("repetition loop detected at step {step}; truncating");
+            break;
+        }
 
-        // Capture self-attn KV for the next step.
+        // Take self-attn KV for the next step out of the outputs (owned, no copy).
         let mut next_self = Vec::with_capacity(2 * n_layers);
         for i in 0..n_layers {
-            let (sk, dk) = outputs[format!("present_self_key_{i}").as_str()]
-                .try_extract_tensor::<f32>()
-                .ort()?;
-            let (sv, dv) = outputs[format!("present_self_value_{i}").as_str()]
-                .try_extract_tensor::<f32>()
-                .ort()?;
-            next_self.push((sk.to_vec(), dk.to_vec()));
-            next_self.push((sv.to_vec(), dv.to_vec()));
+            next_self.push(take_output(&mut outputs, &format!("present_self_key_{i}"))?);
+            next_self.push(take_output(
+                &mut outputs,
+                &format!("present_self_value_{i}"),
+            )?);
         }
         // Cross-attn KV depends only on the encoder output: capture once.
         if step == 0 {
             for i in 0..n_layers {
-                let (sk, dk) = outputs[format!("present_cross_key_{i}").as_str()]
-                    .try_extract_tensor::<f32>()
-                    .ort()?;
-                let (sv, dv) = outputs[format!("present_cross_value_{i}").as_str()]
-                    .try_extract_tensor::<f32>()
-                    .ort()?;
-                cross_kv.push((sk.to_vec(), dk.to_vec()));
-                cross_kv.push((sv.to_vec(), dv.to_vec()));
+                cross_kv.push(take_output(
+                    &mut outputs,
+                    &format!("present_cross_key_{i}"),
+                )?);
+                cross_kv.push(take_output(
+                    &mut outputs,
+                    &format!("present_cross_value_{i}"),
+                )?);
             }
         }
-        drop(outputs);
         past_self = next_self;
     }
+    if !hit_eos && collapse_runaway(&mut tokens) {
+        debug!("runaway decode collapsed to {} tokens", tokens.len() - 1);
+    }
     Ok(tokens)
+}
+
+/// A decode that ran out of token budget without emitting EOS is usually a
+/// repetition loop too short-lived for `truncate_loop` to prove (short clips
+/// give small budgets). Find the shortest period whose cycle covers the tail
+/// at least twice — partial final cycle allowed — and keep a single cycle.
+fn collapse_runaway(tokens: &mut Vec<i64>) -> bool {
+    let len = tokens.len();
+    for period in 1..=len / 2 {
+        let mut run = 0;
+        while run + period < len && tokens[len - 1 - run] == tokens[len - 1 - run - period] {
+            run += 1;
+        }
+        if run >= period {
+            tokens.truncate(len - run);
+            return true;
+        }
+    }
+    false
+}
+
+/// Remove a named output from the session outputs as an owned value.
+fn take_output(outputs: &mut SessionOutputs<'_>, name: &str) -> Result<DynValue> {
+    outputs
+        .remove(name)
+        .ok_or_else(|| anyhow!("model output '{name}' missing"))
+}
+
+/// Greedy Moonshine loops on noisy audio ("…amazing job this is amazing job
+/// this is…"). When the tail of the sequence is the same short token cycle
+/// repeated several times, the decode is stuck: collapse the run to a single
+/// cycle and stop. Single-token cycles need more repeats before tripping —
+/// legitimate dictation repeats one word ("hello hello hello") far more often
+/// than it repeats a whole phrase three times verbatim.
+fn truncate_loop(tokens: &mut Vec<i64>) -> bool {
+    /// Longest cycle (in tokens) we look for; hallucination loops are short phrases.
+    const MAX_PERIOD: usize = 8;
+    /// Consecutive repeats of a multi-token / single-token cycle before tripping.
+    const MIN_REPS: usize = 3;
+    const MIN_REPS_SINGLE: usize = 6;
+
+    for period in 1..=MAX_PERIOD {
+        let reps = if period == 1 {
+            MIN_REPS_SINGLE
+        } else {
+            MIN_REPS
+        };
+        let need = period * reps;
+        if tokens.len() < need {
+            break;
+        }
+        let tail = &tokens[tokens.len() - need..];
+        if !(period..need).all(|i| tail[i] == tail[i - period]) {
+            continue;
+        }
+        // Extend the periodic run as far back as it goes, then keep one cycle.
+        let mut start = tokens.len() - need;
+        while start > 0 && tokens[start - 1] == tokens[start - 1 + period] {
+            start -= 1;
+        }
+        tokens.truncate(start + period);
+        return true;
+    }
+    false
 }
 
 /// First of `names` that exists inside `dir`.
@@ -572,6 +626,62 @@ mod tests {
     fn max_tokens_normal() {
         // 10s at 16 kHz → 10 * 8 = 80 tokens.
         assert_eq!(compute_max_tokens(16_000 * 10), 80);
+    }
+
+    #[test]
+    fn loop_detection_collapses_cycle() {
+        // Prefix X, then cycle A B C repeated 3×: collapse to X + one cycle.
+        let mut t = vec![99, 10, 20, 30, 10, 20, 30, 10, 20, 30];
+        assert!(truncate_loop(&mut t));
+        assert_eq!(t, vec![99, 10, 20, 30]);
+    }
+
+    #[test]
+    fn loop_detection_allows_double_phrase() {
+        // A phrase said twice ("the more you know the more you grow" pattern)
+        // is legitimate — only 2 repeats, gate needs 3.
+        let mut t = vec![10, 20, 30, 40, 10, 20, 30, 40];
+        assert!(!truncate_loop(&mut t));
+        assert_eq!(t.len(), 8);
+    }
+
+    #[test]
+    fn loop_detection_allows_repeated_word() {
+        // "hello hello hello hello hello" (5×) must not trip; 6+ collapses.
+        let mut t = vec![7, 7, 7, 7, 7];
+        assert!(!truncate_loop(&mut t));
+        assert_eq!(t.len(), 5);
+        let mut t = vec![7, 7, 7, 7, 7, 7];
+        assert!(truncate_loop(&mut t));
+        assert_eq!(t, vec![7]);
+    }
+
+    #[test]
+    fn runaway_collapse_keeps_one_cycle() {
+        // Prefix then cycle A B C ×2 + partial: collapse to prefix + one cycle.
+        let mut t = vec![99, 10, 20, 30, 10, 20, 30, 10, 20];
+        assert!(collapse_runaway(&mut t));
+        assert_eq!(t, vec![99, 10, 20, 30]);
+        // Two full cycles, no partial.
+        let mut t = vec![99, 10, 20, 10, 20];
+        assert!(collapse_runaway(&mut t));
+        assert_eq!(t, vec![99, 10, 20]);
+    }
+
+    #[test]
+    fn runaway_collapse_leaves_normal_text() {
+        let mut t = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        assert!(!collapse_runaway(&mut t));
+        assert_eq!(t.len(), 8);
+    }
+
+    #[test]
+    fn loop_detection_allows_normal_text() {
+        let mut t = vec![1, 2, 3, 4, 5, 6, 7, 8, 9];
+        assert!(!truncate_loop(&mut t));
+        // Too short to ever loop.
+        let mut short = vec![1, 2, 3];
+        assert!(!truncate_loop(&mut short));
     }
 
     #[test]
