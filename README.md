@@ -22,7 +22,7 @@ source ~/.cargo/env
 # 2. Install my-voice
 cargo install --git https://github.com/alexljenkins/my-voice
 
-# 3. Download the voice model (~660 MB default, one-time)
+# 3. Download the voice model (~345 MB default, one-time)
 my-voice --download
 
 # 4. Start
@@ -108,7 +108,7 @@ source ~/.cargo/env
 # 2. Install my-voice
 cargo install --git https://github.com/alexljenkins/my-voice
 
-# 3. Download the voice model (~660 MB default, one-time)
+# 3. Download the voice model (~345 MB default, one-time)
 my-voice --download
 
 # 4. Start

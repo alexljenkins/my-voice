@@ -643,12 +643,16 @@ fn apply_reload(
         let c = ModelCache::new(&new);
         c.start_evict_thread();
         *cache = c;
-        let label = match new.model.as_str() {
-            "moonshine-base" => "Switched to moonshine-base. Accuracy improved.".to_string(),
-            "moonshine-tiny" => "Switched to moonshine-tiny. Speed improved.".to_string(),
-            other => format!("Switched to {other}."),
+        let label: &str = match new.model.as_str() {
+            "moonshine-tiny" => "Switched to moonshine-tiny. Fastest, smallest download.",
+            "moonshine-base" => "Switched to moonshine-base. Good balance of speed and accuracy.",
+            "moonshine-streaming-small" => {
+                "Switched to moonshine-streaming-small. Best accuracy for most use cases."
+            }
+            "moonshine-streaming-medium" => "Switched to moonshine-streaming-medium. Highest accuracy.",
+            _ => "Model switched.",
         };
-        notify::send("Model ready", &label);
+        notify::send("Model ready", label);
     }
     *trailing = Duration::from_millis(new.trailing_silence_ms);
     *config = new;

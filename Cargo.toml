@@ -67,8 +67,9 @@ libc = "0.2"             # flock single-instance + signal handler
 
 [features]
 default = []
-# Capture/transcribe diagnostics (--test/--wav/--record). Off by default — these
-# add CLI surface non-technical users don't need and pull in `hound`.
+# Capture/transcribe diagnostics (--test/--wav). Off by default — these add CLI
+# surface non-technical users don't need. Note: --record is always compiled since
+# it's useful for collecting WER samples without any model dependency.
 debug-tools = []
 
 [profile.release]

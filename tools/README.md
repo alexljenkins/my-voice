@@ -1,52 +1,44 @@
 # Audio Pre-Processing Evaluation Harness
 
-Dev tool for benchmarking capture quality. Does not require a running daemon.
+Dev tool for benchmarking capture quality. Requires the binary but no running daemon.
 
 ## 1. Build release binary
 
 ```bash
-cargo build --release
+cargo build --release --features debug-tools
 ```
 
-## 2. Record a single sample
+## 2. Record samples
 
-Records 5 seconds from the default mic, applies the full pipeline (resample → WebRTC APM → peak-normalize), and writes two files:
-
-- `samples/sample_01.wav` — processed 16 kHz mono (feed this to the transcriber)
-- `samples/sample_01_raw.wav` — raw native-rate mono (before any processing)
+`--record <DIR>` runs the normal PTT daemon and saves every utterance to `<DIR>/<timestamp>.wav`
+(and `<timestamp>_raw.wav`). Hold CapsLock, speak, release — repeat as many times as you want.
+Press **Ctrl+C** when done.
 
 ```bash
 mkdir -p samples
-./target/release/my-voice --record samples/sample_01.wav --duration 5
+./target/release/my-voice --record samples/
 ```
 
-Output printed to stdout:
-```
-duration:  5.00s
-peak:      0.9423
-processed: samples/sample_01.wav
-raw:       samples/sample_01_raw.wav
-```
+Each completed hold-to-talk produces:
+- `<timestamp>.wav` — processed 16 kHz mono (what goes to the transcriber)
+- `<timestamp>_raw.wav` — raw native-rate mono (before the APM pipeline)
 
-## 3. Record multiple samples
+## 3. Transcribe and compare
+
+Transcribe a single wav file directly (bypasses the mic, requires a downloaded model):
 
 ```bash
-mkdir -p samples
-for i in 01 02 03 04 05; do
-    echo "Recording sample_${i}.wav — speak now..."
-    ./target/release/my-voice --record samples/sample_${i}.wav --duration 5
-    sleep 1
-done
+# build with debug-tools to get --wav
+./target/release/my-voice --wav samples/1234567890.wav
 ```
 
 ## 4. Write a labels file
 
-`labels.txt` — one line per file, filename and expected text separated by a **tab**:
+`labels.txt` — one line per file, tab-separated:
 
 ```
-sample_01.wav	the quick brown fox jumps over the lazy dog
-sample_02.wav	hello world this is a test
-sample_03.wav	open the pod bay doors hal
+1234567890.wav	the quick brown fox jumps over the lazy dog
+1234567891.wav	hello world this is a test
 ```
 
 No header line. Filenames are basenames only (no path). Lines without a tab are skipped.
@@ -62,24 +54,24 @@ Example output:
 ```
 | File | Expected | Got | Match |
 |------|----------|-----|-------|
-| sample_01.wav | the quick brown fox jumps over the lazy dog | the quick brown fox jumps over the lazy dog | ✓ |
-| sample_02.wav | hello world this is a test | hello world this is a test | ✓ |
-| sample_03.wav | open the pod bay doors hal | open the pod bay doors hal | ✓ |
+| 1234567890.wav | the quick brown fox jumps over the lazy dog | the quick brown fox jumps over the lazy dog | ✓ |
+| 1234567891.wav | hello world this is a test | hello world this is a test | ✓ |
 
 ## Summary
 
-Evaluated: 3 files
-Correct:   3
+Evaluated: 2 files
+Correct:   2
 Accuracy:  100%
 ```
 
-Match comparison is case-insensitive and trims leading/trailing whitespace. Files in the directory that have no entry in `labels.txt` are listed separately as unlabeled.
+Match comparison is case-insensitive and trims leading/trailing whitespace. Files with no
+entry in `labels.txt` are listed separately as unlabeled.
 
 ## Using a specific audio device
 
 ```bash
 ./target/release/my-voice --list-devices
-./target/release/my-voice --record samples/sample_01.wav --duration 5 --config /path/to/config.toml
+./target/release/my-voice --record samples/ --config /path/to/config.toml
 ```
 
 Or set `audio_device` in `~/.config/my-voice/config.toml` before recording.
