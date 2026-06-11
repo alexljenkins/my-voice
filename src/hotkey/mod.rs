@@ -17,6 +17,7 @@ pub enum HotkeyEvent {
 
 /// The modifier keys that may gate a hotkey combo (e.g. `Ctrl+Period`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct Mods {
     pub ctrl: bool,
     pub shift: bool,
@@ -27,6 +28,7 @@ pub struct Mods {
 impl Mods {
     /// True if every modifier this combo requires is currently held (extra
     /// modifiers are allowed — e.g. Shift for the clipboard shortcut).
+    #[allow(dead_code)]
     pub fn satisfied_by(&self, held: &Mods) -> bool {
         (!self.ctrl || held.ctrl)
             && (!self.shift || held.shift)
@@ -37,6 +39,7 @@ impl Mods {
 
 /// Split a hotkey string into its required modifiers and the main key token.
 /// `"Ctrl+Period"` → (`{ctrl}`, `"Period"`); `"CapsLock"` → (`{}`, `"CapsLock"`).
+#[allow(dead_code)]
 pub fn parse_hotkey(s: &str) -> (Mods, &str) {
     let mut mods = Mods::default();
     let parts: Vec<&str> = s

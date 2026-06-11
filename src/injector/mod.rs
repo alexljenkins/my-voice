@@ -4,6 +4,7 @@ use crate::config::Config;
 
 pub trait Injector: Send {
     fn inject(&mut self, text: &str) -> Result<()>;
+    #[allow(dead_code)]
     fn name(&self) -> &'static str;
 }
 

@@ -28,6 +28,7 @@ pub enum TrayState {
 
 /// One model entry in the tray model submenu.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ModelItem {
     /// Config value (e.g. "moonshine-tiny").
     pub name: String,
@@ -52,6 +53,7 @@ pub struct DeviceItem {
 /// All fields default to empty/off so the tray can start before the daemon
 /// pushes real state.
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct TrayMenuState {
     pub models: Vec<ModelItem>,
     /// Curated input devices (enumerated at startup).
@@ -72,6 +74,7 @@ pub struct TrayMenuState {
 
 /// Commands the UI sends back to the daemon.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum UiCommand {
     /// Switch to this model (name matches a `ModelItem::name`).
     SetModel(String),
