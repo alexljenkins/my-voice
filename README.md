@@ -22,7 +22,7 @@ source ~/.cargo/env
 # 2. Install my-voice
 cargo install --git https://github.com/alexljenkins/my-voice
 
-# 3. Download the voice model (~50 MB, one-time)
+# 3. Download the voice model (~660 MB default, one-time)
 my-voice --download
 
 # 4. Start
@@ -108,7 +108,7 @@ source ~/.cargo/env
 # 2. Install my-voice
 cargo install --git https://github.com/alexljenkins/my-voice
 
-# 3. Download the voice model (~50 MB, one-time)
+# 3. Download the voice model (~660 MB default, one-time)
 my-voice --download
 
 # 4. Start
@@ -167,7 +167,7 @@ On Linux, right-click the tray icon to adjust model, microphone, paste mode, and
 Defaults work out of the box. To override, create `~/.config/my-voice/config.toml`:
 
 ```toml
-model = "moonshine-tiny"    # "moonshine-tiny" | "moonshine-base" | /path/to/model
+model = "moonshine-streaming-medium"  # tiny | base | streaming-small | streaming-medium | /path/to/model
 model_dir = "~/.local/share/my-voice/models"
 quantized = true            # smaller, faster — negligible accuracy cost
 threads = 0                 # 0 = auto (up to 4)
@@ -192,28 +192,17 @@ Run `my-voice --config /path/to/file.toml` to use an alternate config file.
 
 | Model | Size (quantized) | Speed | Best for |
 |---|---|---|---|
-| `moonshine-tiny` | ~50 MB | ~10× real-time | Default; clear speech |
+| `moonshine-tiny` | ~50 MB | ~10× real-time | Clear speech, weak CPUs |
 | `moonshine-base` | ~200 MB | ~4× real-time | Noisy mic or accents |
+| `moonshine-streaming-small` | ~350 MB | ~15× real-time | Good accuracy, lighter download |
+| `moonshine-streaming-medium` | ~660 MB | ~12× real-time | **Default**; best accuracy |
+
+Every model is Moonshine (ONNX, English-only). The `streaming-*` variants are
+run as a single push-to-talk pass over the whole utterance, not chunk-by-chunk.
 
 Switch models from the **Model** submenu in the tray (Linux), or by editing `model` in the config file. Run `my-voice --download` after changing the model.
 
 Models are downloaded from HuggingFace and cached in `~/.local/share/my-voice/models/`.
-
-### Whisper backend (advanced)
-
-Supports `.gguf` model files via `whisper.cpp`. Requires `cmake` and a C++ toolchain at build time:
-
-```sh
-cargo install --git https://github.com/alexljenkins/my-voice --features whisper
-```
-
-Then point `model` at a `.gguf` file:
-
-```toml
-model = "/path/to/ggml-base.en.gguf"
-```
-
-Use `.en` English-only variants (faster and more accurate). Recommended: `ggml-base.en.gguf` or `ggml-small.en.gguf` from [ggerganov/whisper.cpp](https://github.com/ggerganov/whisper.cpp).
 
 </details>
 
@@ -243,7 +232,7 @@ my-voice --test   # records 3 seconds and prints the transcription
 cargo test                          # unit tests (no audio, model, or network needed)
 cargo clippy -- -D warnings         # lint
 cargo fmt                           # format
-cargo build --features whisper      # opt-in whisper.cpp backend (needs cmake)
+cargo build --features debug-tools  # enable --test/--wav/--record diagnostics
 ```
 
 Tests cover: resample math, config round-trip, quote normalization, key-name parsing, max-token clamping, injection chain selection.

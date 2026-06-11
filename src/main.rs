@@ -625,10 +625,6 @@ fn build_tray_menu(config: &Config, audio_devices: &[audio::AudioDevice]) -> Tra
     let model_dir = config.resolved_model_dir();
     let models = models::MODELS
         .iter()
-        .filter(|spec| {
-            // Hide whisper-feature models when the binary wasn't built with that feature.
-            !spec.whisper_feature || cfg!(feature = "whisper")
-        })
         .map(|spec| {
             let dir = model_dir.join(spec.name);
             let sentinel = if config.quantized {

@@ -8,8 +8,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-pub use crate::models::Backend;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -30,7 +28,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            model: "moonshine-tiny".into(),
+            model: "moonshine-streaming-medium".into(),
             model_dir: "~/.local/share/my-voice/models".into(),
             quantized: true,
             threads: 0,
@@ -44,14 +42,6 @@ impl Default for Config {
             injection: "auto".into(),
         }
     }
-}
-
-/// A fully resolved model location plus the backend it maps to.
-#[derive(Debug, Clone)]
-pub struct ModelResolution {
-    pub backend: Backend,
-    /// Directory (Moonshine) or `.gguf` file (Whisper).
-    pub path: PathBuf,
 }
 
 impl Config {
@@ -161,36 +151,14 @@ impl Config {
         dir.join(sentinel).exists()
     }
 
-    /// Map `model` → backend + concrete path. Does not check existence.
-    pub fn resolve_model(&self) -> ModelResolution {
-        let m = &self.model;
-
-        // Registry lookup first — covers all named auto-downloadable models.
-        if let Some(spec) = crate::models::find(m) {
-            let base = self.resolved_model_dir().join(m);
-            // GGML models point to the file directly; ONNX models to a directory.
-            let path = match spec.backend {
-                Backend::Whisper => base.join(spec.sentinel_quantized),
-                _ => base,
-            };
-            return ModelResolution {
-                backend: spec.backend.clone(),
-                path,
-            };
-        }
-
-        // Custom / arbitrary paths: infer backend from extension or assume Moonshine.
-        let path = expand_tilde(m);
-        if m.ends_with(".gguf") || m.ends_with(".bin") {
-            ModelResolution {
-                backend: Backend::Whisper,
-                path,
-            }
+    /// Map `model` → the Moonshine model directory. Does not check existence.
+    /// Named registry models live under `model_dir/<name>`; anything else is
+    /// treated as a custom (tilde-expanded) path to a model directory.
+    pub fn resolve_model(&self) -> PathBuf {
+        if crate::models::find(&self.model).is_some() {
+            self.resolved_model_dir().join(&self.model)
         } else {
-            ModelResolution {
-                backend: Backend::Moonshine,
-                path,
-            }
+            expand_tilde(&self.model)
         }
     }
 }
@@ -219,7 +187,7 @@ mod tests {
         let cfg = Config::default();
         let toml = toml::to_string(&cfg).unwrap();
         let back: Config = toml::from_str(&toml).unwrap();
-        assert_eq!(back.model, "moonshine-tiny");
+        assert_eq!(back.model, "moonshine-streaming-medium");
         assert_eq!(back.min_speech_ms, 300);
         assert_eq!(back.trailing_silence_ms, 150);
         assert!(back.quantized);
@@ -229,35 +197,25 @@ mod tests {
     fn partial_config_keeps_defaults() {
         let cfg: Config = toml::from_str("min_speech_ms = 500").unwrap();
         assert_eq!(cfg.min_speech_ms, 500);
-        assert_eq!(cfg.model, "moonshine-tiny"); // default preserved
+        assert_eq!(cfg.model, "moonshine-streaming-medium"); // default preserved
     }
 
     #[test]
     fn model_resolution_named() {
         let cfg = Config::default();
-        let r = cfg.resolve_model();
-        assert_eq!(r.backend, Backend::Moonshine);
-        assert!(r.path.ends_with("moonshine-tiny"));
+        assert!(cfg.resolve_model().ends_with("moonshine-streaming-medium"));
     }
 
     #[test]
-    fn model_resolution_gguf() {
-        let cfg = Config {
-            model: "/models/ggml-base.en.gguf".into(),
-            ..Default::default()
-        };
-        let r = cfg.resolve_model();
-        assert_eq!(r.backend, Backend::Whisper);
-        assert_eq!(r.path, PathBuf::from("/models/ggml-base.en.gguf"));
-    }
-
-    #[test]
-    fn model_resolution_dir_is_moonshine() {
+    fn model_resolution_custom_path() {
         let cfg = Config {
             model: "/models/custom-moonshine".into(),
             ..Default::default()
         };
-        assert_eq!(cfg.resolve_model().backend, Backend::Moonshine);
+        assert_eq!(
+            cfg.resolve_model(),
+            PathBuf::from("/models/custom-moonshine")
+        );
     }
 
     #[test]

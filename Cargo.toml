@@ -26,9 +26,6 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 dirs = "5"
 
-# whisper.cpp backend — opt-in; compiles C++ via cmake.
-whisper-rs = { version = "0.16", optional = true }
-
 # Model download + integrity check.
 ureq = "2"
 sha2 = "0.10"
@@ -70,7 +67,6 @@ libc = "0.2"             # flock single-instance + signal handler
 
 [features]
 default = []
-whisper = ["dep:whisper-rs"]
 # Capture/transcribe diagnostics (--test/--wav/--record). Off by default — these
 # add CLI surface non-technical users don't need and pull in `hound`.
 debug-tools = []

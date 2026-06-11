@@ -1,25 +1,14 @@
 /// Static model registry — the single source of truth for every named model.
 ///
-/// Adding a new auto-downloadable model means adding one entry here; no other
-/// files need touching.
+/// Every model is Moonshine (ONNX). Adding a new auto-downloadable model means
+/// adding one entry here; no other files need touching.
 pub type FileEntry = (&'static str, &'static str);
-
-/// Which transcription backend a model requires.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Backend {
-    Moonshine,
-    Whisper,
-    /// Not yet implemented — reserved for a future Parakeet transcriber.
-    #[allow(dead_code)]
-    Parakeet,
-}
 
 pub struct ModelSpec {
     /// The string users put in `config.model`, e.g. `"moonshine-tiny"`.
     pub name: &'static str,
     /// Display label shown in the tray menu.
     pub label: &'static str,
-    pub backend: Backend,
     /// HuggingFace repo slug, e.g. `"onnx-community/moonshine-tiny-ONNX"`.
     pub hf_repo: &'static str,
     /// Files to download when `config.quantized = true`. Each entry is
@@ -35,15 +24,12 @@ pub struct ModelSpec {
     /// SHA-256 checksums for pinned files: `(local_filename, hex_digest)`.
     /// Files not listed here skip integrity verification.
     pub checksums: &'static [(&'static str, &'static str)],
-    /// True = only show/download when compiled with `--features whisper`.
-    pub whisper_feature: bool,
 }
 
 pub static MODELS: &[ModelSpec] = &[
     ModelSpec {
         name: "moonshine-tiny",
         label: "Faster  •  moonshine-tiny",
-        backend: Backend::Moonshine,
         hf_repo: "onnx-community/moonshine-tiny-ONNX",
         files_quantized: &[
             (
@@ -84,12 +70,10 @@ pub static MODELS: &[ModelSpec] = &[
                 "4131cef00b62942e9cdef691101f2cc7dbbcd828d71eee8c6c46c28fd051d6cb",
             ),
         ],
-        whisper_feature: false,
     },
     ModelSpec {
         name: "moonshine-base",
-        label: "Accurate  •  moonshine-base",
-        backend: Backend::Moonshine,
+        label: "Balanced  •  moonshine-base",
         hf_repo: "onnx-community/moonshine-base-ONNX",
         files_quantized: &[
             (
@@ -130,20 +114,76 @@ pub static MODELS: &[ModelSpec] = &[
                 "58778763ca8438963190244d6b26572bdca2cedec56a4b91e828f3f2d69ef3c5",
             ),
         ],
-        whisper_feature: false,
+    },
+    // Streaming Moonshine (split-decoder ONNX). These ship int8-quantized only,
+    // so the "full" file set is identical to the quantized one. We run them as a
+    // single-pass push-to-talk transcription (full audio at once), not chunked.
+    ModelSpec {
+        name: "moonshine-streaming-small",
+        label: "Accurate  •  moonshine-small",
+        hf_repo: "Mazino0/moonshine-streaming-small-onnx",
+        files_quantized: STREAMING_FILES,
+        files_full: STREAMING_FILES,
+        sentinel_quantized: "encoder_model_int8.onnx",
+        sentinel_full: "encoder_model_int8.onnx",
+        checksums: &[
+            (
+                "encoder_model_int8.onnx",
+                "9bb6562667da35c8b6994bd76139528610738a33c1c3fa234024c75a6affa509",
+            ),
+            (
+                "decoder_model_int8.onnx",
+                "8c1a86e1b3059950d8285a47f3dae1fb6166f0337046e115965498e7957be158",
+            ),
+            (
+                "decoder_with_past_model_int8.onnx",
+                "e9bfbc4f2b34ea82ff5b562cc20d3eafcf87a8a25ea9bcaabd8513078dbc0565",
+            ),
+            (
+                "tokenizer.json",
+                "7b913404bdd039af4756783218af4440bc07fb7d6d8258d677e34f95b3ec416f",
+            ),
+        ],
     },
     ModelSpec {
-        name: "distil-whisper-large-v3",
-        label: "Robust  •  distil-whisper-large-v3",
-        backend: Backend::Whisper,
-        hf_repo: "distil-whisper/distil-large-v3-ggml",
-        files_quantized: &[("ggml-distil-large-v3.bin", "ggml-distil-large-v3.bin")],
-        files_full: &[("ggml-distil-large-v3.bin", "ggml-distil-large-v3.bin")],
-        sentinel_quantized: "ggml-distil-large-v3.bin",
-        sentinel_full: "ggml-distil-large-v3.bin",
-        checksums: &[], // TODO: pin sha256 after first verified download
-        whisper_feature: true,
+        name: "moonshine-streaming-medium",
+        label: "Most accurate  •  moonshine-medium",
+        hf_repo: "Mazino0/moonshine-streaming-medium-onnx",
+        files_quantized: STREAMING_FILES,
+        files_full: STREAMING_FILES,
+        sentinel_quantized: "encoder_model_int8.onnx",
+        sentinel_full: "encoder_model_int8.onnx",
+        checksums: &[
+            (
+                "encoder_model_int8.onnx",
+                "4f6c491eb4018a06f2e9ecf5b6bab5c6fa4e679c9ed5dde02a0a27969649be90",
+            ),
+            (
+                "decoder_model_int8.onnx",
+                "38dfe5829fcb814e33634c00baedceaa877acaac7b731203e88eb956d4419875",
+            ),
+            (
+                "decoder_with_past_model_int8.onnx",
+                "36d7ea3cf4feb6e37fe784ba3ac7cee0bb5f4d757ab05433e2550b8eae035a7e",
+            ),
+            (
+                "tokenizer.json",
+                "7b913404bdd039af4756783218af4440bc07fb7d6d8258d677e34f95b3ec416f",
+            ),
+        ],
     },
+];
+
+/// Streaming repos lay files at the repo root with `_int8` suffixes and ship no
+/// full-precision variant, so quantized and full share this list.
+const STREAMING_FILES: &[FileEntry] = &[
+    ("encoder_model_int8.onnx", "encoder_model_int8.onnx"),
+    ("decoder_model_int8.onnx", "decoder_model_int8.onnx"),
+    (
+        "decoder_with_past_model_int8.onnx",
+        "decoder_with_past_model_int8.onnx",
+    ),
+    ("tokenizer.json", "tokenizer.json"),
 ];
 
 /// Look up a named model in the registry.
