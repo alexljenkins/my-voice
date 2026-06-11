@@ -167,7 +167,7 @@ On Linux, right-click the tray icon to adjust model, microphone, paste mode, and
 Defaults work out of the box. To override, create `~/.config/my-voice/config.toml`:
 
 ```toml
-model = "moonshine-streaming-medium"  # tiny | base | streaming-small | streaming-medium | /path/to/model
+model = "moonshine-streaming-small"  # tiny | base | streaming-small | streaming-medium | /path/to/model
 model_dir = "~/.local/share/my-voice/models"
 quantized = true            # smaller, faster — negligible accuracy cost
 threads = 0                 # 0 = auto (up to 8)
@@ -192,10 +192,10 @@ Run `my-voice --config /path/to/file.toml` to use an alternate config file.
 
 | Model | Size (quantized) | Speed | Best for |
 |---|---|---|---|
-| `moonshine-tiny` | ~50 MB | ~10× real-time | Clear speech, weak CPUs |
-| `moonshine-base` | ~200 MB | ~4× real-time | Noisy mic or accents |
-| `moonshine-streaming-small` | ~350 MB | ~15× real-time | Good accuracy, lighter download |
-| `moonshine-streaming-medium` | ~660 MB | ~12× real-time | **Default**; best accuracy |
+| `moonshine-tiny` | ~31 MB | ~10× real-time | Clear speech, weak CPUs |
+| `moonshine-base` | ~64 MB | ~4× real-time | Small download, decent accuracy |
+| `moonshine-streaming-small` | ~345 MB | ~15× real-time | **Default**; best accuracy-per-MB |
+| `moonshine-streaming-medium` | ~566 MB | ~12× real-time | Best accuracy |
 
 Every model is Moonshine (ONNX, English-only). The `streaming-*` variants are
 run as a single push-to-talk pass over the whole utterance, not chunk-by-chunk.
