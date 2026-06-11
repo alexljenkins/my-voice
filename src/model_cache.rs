@@ -6,12 +6,12 @@
 //! lock. Load is deferred to first use so the daemon starts instantly and idle
 //! sessions hold no model in RAM.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 use crate::config::Config;
 use crate::transcriber::{self, Transcriber};
@@ -19,30 +19,72 @@ use crate::transcriber::{self, Transcriber};
 /// How often the evict thread wakes to check idle time.
 const EVICT_TICK: Duration = Duration::from_secs(30);
 
+type Factory = dyn Fn() -> Result<Box<dyn Transcriber>> + Send + Sync;
+
 pub struct ModelCache {
     slot: Mutex<Option<Box<dyn Transcriber>>>,
     last_used: Mutex<Instant>,
-    config: Config,
+    factory: Box<Factory>,
     /// `-1` never evict, `0` reload every use, `>0` evict after N idle seconds.
     timeout_secs: i64,
 }
 
 impl ModelCache {
     pub fn new(config: &Config) -> Arc<Self> {
+        let config = config.clone();
+        Self::with_factory(
+            config.load_timeout_secs,
+            Box::new(move || transcriber::create(&config)),
+        )
+    }
+
+    fn with_factory(timeout_secs: i64, factory: Box<Factory>) -> Arc<Self> {
         Arc::new(Self {
             slot: Mutex::new(None),
             last_used: Mutex::new(Instant::now()),
-            config: config.clone(),
-            timeout_secs: config.load_timeout_secs,
+            factory,
+            timeout_secs,
+        })
+    }
+
+    /// Lock the slot, recovering from poison. A panic inside `transcribe` (on a
+    /// worker thread) poisons this mutex; without recovery every later lock
+    /// unwraps Err and the daemon is wedged until restart. The transcriber that
+    /// was live during the panic may be mid-mutation, so drop it and rebuild on
+    /// next use.
+    fn lock_slot(&self) -> MutexGuard<'_, Option<Box<dyn Transcriber>>> {
+        match self.slot.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                self.slot.clear_poison();
+                let mut guard = poisoned.into_inner();
+                *guard = None;
+                error!("transcriber panicked earlier; model dropped, will reload on next use");
+                crate::notify::once(
+                    crate::notify::ErrorKind::TranscriberPanicked,
+                    "Transcription error",
+                    "The speech model crashed and was reset — it will reload on next use.",
+                );
+                guard
+            }
+        }
+    }
+
+    /// `last_used` is only ever assigned while held, so poison here means a
+    /// panic elsewhere on the thread; the Instant itself can't be corrupt.
+    fn lock_last_used(&self) -> MutexGuard<'_, Instant> {
+        self.last_used.lock().unwrap_or_else(|poisoned| {
+            self.last_used.clear_poison();
+            poisoned.into_inner()
         })
     }
 
     /// Load the model if it isn't resident; cheap no-op when it is. Spawned on a
     /// throwaway thread at keydown so the ~1s cold start overlaps with speech.
     pub fn ensure_loaded(&self) -> Result<()> {
-        let mut slot = self.slot.lock().unwrap();
-        load_locked(&mut slot, &self.config)?;
-        *self.last_used.lock().unwrap() = Instant::now();
+        let mut slot = self.lock_slot();
+        load_locked(&mut slot, &self.factory)?;
+        *self.lock_last_used() = Instant::now();
         Ok(())
     }
 
@@ -51,10 +93,10 @@ impl ModelCache {
     /// load and no race. With `timeout_secs == 0` the model is dropped before
     /// returning — reload-every-use mode.
     pub fn transcribe(&self, audio: &[f32]) -> Result<String> {
-        let mut slot = self.slot.lock().unwrap();
-        load_locked(&mut slot, &self.config)?;
+        let mut slot = self.lock_slot();
+        load_locked(&mut slot, &self.factory)?;
         let text = slot.as_mut().unwrap().transcribe(audio)?;
-        *self.last_used.lock().unwrap() = Instant::now();
+        *self.lock_last_used() = Instant::now();
         if self.timeout_secs == 0 {
             *slot = None;
             debug!("model unloaded (load_timeout_secs = 0)");
@@ -71,13 +113,13 @@ impl ModelCache {
         let me = Arc::clone(self);
         thread::spawn(move || loop {
             thread::sleep(EVICT_TICK);
-            let mut slot = me.slot.lock().unwrap();
+            let mut slot = me.lock_slot();
             if slot.is_none() {
                 continue;
             }
             // Re-check idle *after* acquiring the lock: a transcription may have
             // touched last_used while we slept or waited on the lock.
-            let idle = me.last_used.lock().unwrap().elapsed();
+            let idle = me.lock_last_used().elapsed();
             if idle.as_secs() as i64 >= me.timeout_secs {
                 *slot = None;
                 info!("model unloaded after {}s idle", idle.as_secs());
@@ -87,11 +129,75 @@ impl ModelCache {
 }
 
 /// Build the transcriber into `slot` if empty. Caller holds the slot lock.
-fn load_locked(slot: &mut Option<Box<dyn Transcriber>>, config: &Config) -> Result<()> {
+fn load_locked(slot: &mut Option<Box<dyn Transcriber>>, factory: &Factory) -> Result<()> {
     if slot.is_none() {
         let t0 = Instant::now();
-        *slot = Some(transcriber::create(config)?);
+        *slot = Some(factory()?);
         info!("model loaded in {} ms", t0.elapsed().as_millis());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::panic::AssertUnwindSafe;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    struct PanicTranscriber;
+    impl Transcriber for PanicTranscriber {
+        fn transcribe(&mut self, _audio: &[f32]) -> Result<String> {
+            panic!("transcriber blew up");
+        }
+    }
+
+    struct OkTranscriber;
+    impl Transcriber for OkTranscriber {
+        fn transcribe(&mut self, _audio: &[f32]) -> Result<String> {
+            Ok("ok".into())
+        }
+    }
+
+    /// First build panics mid-transcribe (poisoning the slot mutex); the cache
+    /// must recover, drop the dead transcriber, and rebuild on the next call.
+    #[test]
+    fn poisoned_slot_recovers_and_rebuilds() {
+        let builds = Arc::new(AtomicUsize::new(0));
+        let b = Arc::clone(&builds);
+        let cache = ModelCache::with_factory(
+            -1,
+            Box::new(move || {
+                Ok(if b.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Box::new(PanicTranscriber) as Box<dyn Transcriber>
+                } else {
+                    Box::new(OkTranscriber)
+                })
+            }),
+        );
+
+        let panicked =
+            std::panic::catch_unwind(AssertUnwindSafe(|| cache.transcribe(&[0.0]))).is_err();
+        assert!(panicked, "PanicTranscriber should have panicked");
+
+        assert_eq!(cache.transcribe(&[0.0]).unwrap(), "ok");
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            2,
+            "model should be rebuilt after poison"
+        );
+    }
+
+    /// ensure_loaded must also survive a poisoned slot (keydown preload path).
+    #[test]
+    fn poisoned_slot_recovers_in_ensure_loaded() {
+        let cache = ModelCache::with_factory(
+            -1,
+            Box::new(|| Ok(Box::new(PanicTranscriber) as Box<dyn Transcriber>)),
+        );
+        let _ = std::panic::catch_unwind(AssertUnwindSafe(|| cache.transcribe(&[0.0])));
+        cache
+            .ensure_loaded()
+            .expect("ensure_loaded should recover from poison");
+    }
 }

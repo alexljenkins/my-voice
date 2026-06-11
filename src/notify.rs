@@ -15,6 +15,7 @@ pub enum ErrorKind {
     ModelMissing,
     ModelDownloadFailed,
     InjectionFailed,
+    TranscriberPanicked,
 }
 
 static SEEN: OnceLock<Mutex<HashSet<ErrorKind>>> = OnceLock::new();
