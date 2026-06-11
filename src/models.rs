@@ -24,6 +24,9 @@ pub struct ModelSpec {
     /// SHA-256 checksums for pinned files: `(local_filename, hex_digest)`.
     /// Files not listed here skip integrity verification.
     pub checksums: &'static [(&'static str, &'static str)],
+    /// Approximate download size of the quantized (default) file set, in MB.
+    /// User-facing text only — never used for allocation or verification.
+    pub approx_mb: u32,
 }
 
 pub static MODELS: &[ModelSpec] = &[
@@ -70,6 +73,7 @@ pub static MODELS: &[ModelSpec] = &[
                 "4131cef00b62942e9cdef691101f2cc7dbbcd828d71eee8c6c46c28fd051d6cb",
             ),
         ],
+        approx_mb: 31,
     },
     ModelSpec {
         name: "moonshine-base",
@@ -114,6 +118,7 @@ pub static MODELS: &[ModelSpec] = &[
                 "58778763ca8438963190244d6b26572bdca2cedec56a4b91e828f3f2d69ef3c5",
             ),
         ],
+        approx_mb: 64,
     },
     // Streaming Moonshine (split-decoder ONNX). These ship int8-quantized only,
     // so the "full" file set is identical to the quantized one. We run them as a
@@ -144,6 +149,7 @@ pub static MODELS: &[ModelSpec] = &[
                 "7b913404bdd039af4756783218af4440bc07fb7d6d8258d677e34f95b3ec416f",
             ),
         ],
+        approx_mb: 345,
     },
     ModelSpec {
         name: "moonshine-streaming-medium",
@@ -171,6 +177,7 @@ pub static MODELS: &[ModelSpec] = &[
                 "7b913404bdd039af4756783218af4440bc07fb7d6d8258d677e34f95b3ec416f",
             ),
         ],
+        approx_mb: 566,
     },
 ];
 

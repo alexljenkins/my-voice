@@ -296,10 +296,14 @@ fn run_daemon(
     // error — the tray Downloading state makes the reason obvious.
     if !config.is_model_downloaded() {
         info!("model not found — starting background download");
+        let size = match models::find(&config.model) {
+            Some(spec) => format!(" (~{} MB)", spec.approx_mb),
+            None => String::new(), // custom model path — size unknown
+        };
         notify::once(
             notify::ErrorKind::ModelMissing,
             "Speech model not found",
-            "Downloading the speech model now (~50 MB). my-voice will be ready in a moment.",
+            &format!("Downloading the speech model now{size}. my-voice will be ready in a moment."),
         );
         let tx = daemon_tx.clone();
         download::start_background(config.clone(), move |event| {
