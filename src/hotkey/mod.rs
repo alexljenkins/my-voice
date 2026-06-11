@@ -15,6 +15,46 @@ pub enum HotkeyEvent {
     Release,
 }
 
+/// The modifier keys that may gate a hotkey combo (e.g. `Ctrl+Period`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Mods {
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
+    pub sup: bool,
+}
+
+impl Mods {
+    /// True if every modifier this combo requires is currently held (extra
+    /// modifiers are allowed — e.g. Shift for the clipboard shortcut).
+    pub fn satisfied_by(&self, held: &Mods) -> bool {
+        (!self.ctrl || held.ctrl)
+            && (!self.shift || held.shift)
+            && (!self.alt || held.alt)
+            && (!self.sup || held.sup)
+    }
+}
+
+/// Split a hotkey string into its required modifiers and the main key token.
+/// `"Ctrl+Period"` → (`{ctrl}`, `"Period"`); `"CapsLock"` → (`{}`, `"CapsLock"`).
+pub fn parse_hotkey(s: &str) -> (Mods, &str) {
+    let mut mods = Mods::default();
+    let parts: Vec<&str> = s.split('+').map(str::trim).filter(|p| !p.is_empty()).collect();
+    let Some((main, modifiers)) = parts.split_last() else {
+        return (mods, s);
+    };
+    for m in modifiers {
+        match m.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => mods.ctrl = true,
+            "shift" => mods.shift = true,
+            "alt" => mods.alt = true,
+            "super" | "meta" | "win" | "cmd" => mods.sup = true,
+            _ => {}
+        }
+    }
+    (mods, main)
+}
+
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]

@@ -30,6 +30,19 @@ pub fn detect(config: &Config) -> Box<dyn Injector> {
     }
 }
 
+/// Whether direct typing ("Paste at cursor") is available, plus an unlock hint
+/// for the menu when it isn't. macOS always types via CGEvent.
+pub fn typing_availability() -> (bool, String) {
+    #[cfg(target_os = "linux")]
+    {
+        linux::typing_availability()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        (true, String::new())
+    }
+}
+
 /// Build the clipboard injector used for the Shift+hotkey path.
 pub fn clipboard() -> Box<dyn Injector> {
     #[cfg(target_os = "linux")]

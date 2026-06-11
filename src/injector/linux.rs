@@ -301,6 +301,44 @@ pub fn clipboard_injector() -> Box<dyn Injector> {
     build_clipboard()
 }
 
+/// Whether "Paste at cursor" can actually type, plus a plain-language unlock hint
+/// for the menu when it can't. Probed at startup and on reload (cheap: PATH checks
+/// + one D-Bus probe on X11). The hint names the missing tool and the exact install
+/// command for the detected package manager.
+pub fn typing_availability() -> (bool, String) {
+    match detect_session() {
+        Session::Wayland => {
+            let available = binary_on_path("wtype")
+                || (binary_on_path("ydotool") && find_ydotool_socket().is_some());
+            (available, format!("Install a typing tool to enable:\n{}", install_cmd("wtype")))
+        }
+        Session::X11 => {
+            let available = binary_on_path("xdotool") || try_atspi().is_some();
+            (available, format!("Install a typing tool to enable:\n{}", install_cmd("xdotool")))
+        }
+        Session::None => (
+            false,
+            "No display server detected — typing into apps isn't possible here.".into(),
+        ),
+    }
+}
+
+/// Build the install command for the detected package manager. Falls back to apt
+/// (the most common on the target desktops) when none is recognised.
+fn install_cmd(pkg: &str) -> String {
+    for (bin, tmpl) in [
+        ("apt", "sudo apt install {}"),
+        ("dnf", "sudo dnf install {}"),
+        ("pacman", "sudo pacman -S {}"),
+        ("zypper", "sudo zypper install {}"),
+    ] {
+        if binary_on_path(bin) {
+            return tmpl.replace("{}", pkg);
+        }
+    }
+    format!("sudo apt install {pkg}")
+}
+
 fn build_auto_chain(session: Session) -> Vec<Box<dyn Injector>> {
     let mut chain: Vec<Box<dyn Injector>> = Vec::new();
     match session {

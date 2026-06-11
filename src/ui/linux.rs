@@ -1,53 +1,47 @@
 //! Linux tray via `ksni` (pure-Rust StatusNotifierItem over D-Bus). Runs on its
 //! own thread, so the daemon keeps the main thread.
 //!
-//! §3: icon pixmaps — programmatic microphone silhouette at 16×16 and 32×32,
-//!     ARGB32 format. Themed icon names remain as the primary source for
-//!     desktops with a proper icon theme; pixmaps are the fallback.
+//! Icons are driven by our own colored pixmaps (not themed names): symbolic
+//! desktop themes render the record glyph monochrome-grey, which hid the
+//! "listening" state — so we render a grey mic when idle and a solid red dot
+//! while recording, and leave `icon_name` empty so the host uses our pixmap.
 //!
-//! §4: full settings menu — Model / Microphone / Hotkey / Inject as submenus
-//!     plus Clipboard shortcut, Grab mode, and Quit.
+//! Menu: Model / Microphone / Hotkeys / Paste mode submenus, then Start at
+//! Login and Quit. The "current" option in every submenu is marked with a green
+//! dot (a generated PNG in `icon_data` — menu text can't be colored or bolded in
+//! DBusMenu) and stays enabled; only genuinely unavailable options are greyed.
 
 use std::sync::mpsc::Sender;
+use std::sync::OnceLock;
 
 use ksni::blocking::{Handle, TrayMethods};
 use tracing::{info, warn};
 
 use super::{TrayMenuState, TrayState, UiCommand};
 
-// ── §3 icon generation ───────────────────────────────────────────────────────
+// ── icon generation ──────────────────────────────────────────────────────────
 
-/// 16×16 microphone silhouette bitmap. Each u16 is one row; bit 15 = col 0.
-/// Shape: rounded capsule body (rows 1-6), neck (row 7), mount yoke (row 8),
-/// stand (rows 9-10), base plate (row 11).
+/// 16×16 microphone silhouette. Each u16 is one row; bit 15 = col 0.
 const MIC_16: [u16; 16] = [
-    0x0000, // row 0
-    0x03C0, // row 1  cols 6-9  (capsule top arc)
-    0x07E0, // row 2  cols 5-10 (capsule body)
-    0x07E0, // row 3
-    0x07E0, // row 4
-    0x07E0, // row 5
-    0x03C0, // row 6  cols 6-9  (capsule bottom arc)
-    0x0180, // row 7  cols 7-8  (neck)
-    0x0FF0, // row 8  cols 4-11 (mount yoke)
-    0x0180, // row 9  cols 7-8  (stand)
-    0x0180, // row 10
-    0x07E0, // row 11 cols 5-10 (base plate)
-    0x0000, // row 12
-    0x0000, // row 13
-    0x0000, // row 14
-    0x0000, // row 15
+    0x0000, 0x03C0, 0x07E0, 0x07E0, 0x07E0, 0x07E0, 0x03C0, 0x0180,
+    0x0FF0, 0x0180, 0x0180, 0x07E0, 0x0000, 0x0000, 0x0000, 0x0000,
 ];
 
-/// Build an ARGB32 `ksni::Icon` of `size`×`size` pixels in the given RGB color.
-/// The 16×16 mic silhouette is scaled up (nearest-neighbour) for sizes > 16.
-fn make_mic_icon(size: usize, r: u8, g: u8, b: u8) -> ksni::Icon {
+/// 16×16 filled circle — the universal "recording" dot for the listening state.
+const CIRCLE_16: [u16; 16] = [
+    0x0000, 0x07E0, 0x1FF8, 0x3FFC, 0x7FFE, 0x7FFE, 0xFFFF, 0xFFFF,
+    0xFFFF, 0xFFFF, 0x7FFE, 0x7FFE, 0x3FFC, 0x1FF8, 0x07E0, 0x0000,
+];
+
+/// Build an ARGB32 `ksni::Icon` of `size`×`size` from a 16-row bitmap, scaled
+/// nearest-neighbour, in the given RGB color.
+fn make_icon(bitmap: &[u16; 16], size: usize, r: u8, g: u8, b: u8) -> ksni::Icon {
     let scale = (size / 16).max(1);
     let actual = scale * 16;
     let mut data = vec![0u8; actual * actual * 4];
     for row in 0..16usize {
         for col in 0..16usize {
-            if (MIC_16[row] >> (15 - col)) & 1 == 0 {
+            if (bitmap[row] >> (15 - col)) & 1 == 0 {
                 continue;
             }
             for dr in 0..scale {
@@ -64,22 +58,53 @@ fn make_mic_icon(size: usize, r: u8, g: u8, b: u8) -> ksni::Icon {
     ksni::Icon { width: actual as i32, height: actual as i32, data }
 }
 
-fn state_color(state: &TrayState) -> (u8, u8, u8) {
+/// (bitmap, color) for the tray icon in each state.
+fn state_icon(state: &TrayState) -> (&'static [u16; 16], (u8, u8, u8)) {
     match state {
-        TrayState::Ready => (200, 200, 200),
-        TrayState::Listening => (220, 60, 60),
-        TrayState::Transcribing => (200, 140, 0),
-        TrayState::Downloading { .. } => (60, 140, 220),
-        TrayState::Error(_) => (220, 150, 0),
+        TrayState::Ready => (&MIC_16, (170, 170, 170)),         // neutral grey mic
+        TrayState::Listening => (&CIRCLE_16, (230, 40, 40)),    // solid red record dot
+        TrayState::Transcribing => (&MIC_16, (235, 170, 0)),    // amber mic
+        TrayState::Downloading { .. } => (&MIC_16, (70, 150, 230)),
+        TrayState::Error(_) => (&CIRCLE_16, (235, 150, 0)),
     }
 }
 
-// ── §4 menu constants ────────────────────────────────────────────────────────
+/// Generated green "selected" dot as PNG bytes, cached. Used as menu-item
+/// `icon_data` to mark the current option in a theme-independent green.
+fn green_dot() -> Vec<u8> {
+    static CACHE: OnceLock<Vec<u8>> = OnceLock::new();
+    CACHE.get_or_init(|| dot_png((64, 200, 96))).clone()
+}
 
-static HOTKEY_OPTIONS: &[&str] = &[
-    "CapsLock", "RightCtrl", "F12", "F13", "F14", "F15", "F16", "F17", "F18",
-    "F19", "F20", "ScrollLock",
-];
+/// Anti-aliased filled circle, RGBA, encoded as PNG.
+fn dot_png(rgb: (u8, u8, u8)) -> Vec<u8> {
+    const S: u32 = 22;
+    let mut data = vec![0u8; (S * S * 4) as usize];
+    let c = (S as f32 - 1.0) / 2.0;
+    let radius = S as f32 * 0.40;
+    for y in 0..S {
+        for x in 0..S {
+            let (dx, dy) = (x as f32 - c, y as f32 - c);
+            let dist = (dx * dx + dy * dy).sqrt();
+            let alpha = ((radius - dist + 0.5).clamp(0.0, 1.0) * 255.0) as u8;
+            let i = ((y * S + x) * 4) as usize;
+            data[i] = rgb.0;
+            data[i + 1] = rgb.1;
+            data[i + 2] = rgb.2;
+            data[i + 3] = alpha;
+        }
+    }
+    let mut out = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut out, S, S);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        if let Ok(mut writer) = enc.write_header() {
+            let _ = writer.write_image_data(&data);
+        }
+    }
+    out
+}
 
 // ── tray model ───────────────────────────────────────────────────────────────
 
@@ -87,6 +112,34 @@ pub struct MyVoiceTray {
     state: TrayState,
     menu: TrayMenuState,
     cmd_tx: Sender<UiCommand>,
+}
+
+type Item = ksni::menu::MenuItem<MyVoiceTray>;
+
+/// A selectable option row: marked with the green dot when current, greyed only
+/// when unavailable (current stays clickable, never greyed).
+fn option_row<F>(label: String, selected: bool, available: bool, on_activate: F) -> Item
+where
+    F: Fn(&mut MyVoiceTray) + Send + 'static,
+{
+    ksni::menu::StandardItem {
+        label,
+        enabled: available,
+        icon_data: if selected { green_dot() } else { Vec::new() },
+        activate: Box::new(on_activate),
+        ..Default::default()
+    }
+    .into()
+}
+
+/// A non-interactive, indented helper line under an option.
+fn hint_line(text: &str) -> Item {
+    ksni::menu::StandardItem {
+        label: format!("    {text}"),
+        enabled: false,
+        ..Default::default()
+    }
+    .into()
 }
 
 impl ksni::Tray for MyVoiceTray {
@@ -103,27 +156,20 @@ impl ksni::Tray for MyVoiceTray {
     }
 
     fn icon_name(&self) -> String {
-        // Primary: themed freedesktop icon names (work on desktops with icon themes).
-        match &self.state {
-            TrayState::Ready => "audio-input-microphone",
-            TrayState::Listening => "media-record",
-            TrayState::Transcribing => "view-refresh",
-            TrayState::Downloading { .. } => "emblem-downloads",
-            TrayState::Error(_) => "dialog-warning",
-        }
-        .into()
+        // Deliberately empty: forces the host to use our colored pixmap rather
+        // than a monochrome symbolic theme icon (which hid the listening state).
+        String::new()
     }
 
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
-        // Fallback: programmatic mic silhouette in state-specific color.
-        let (r, g, b) = state_color(&self.state);
-        vec![make_mic_icon(16, r, g, b), make_mic_icon(32, r, g, b)]
+        let (bitmap, (r, g, b)) = state_icon(&self.state);
+        vec![make_icon(bitmap, 16, r, g, b), make_icon(bitmap, 32, r, g, b)]
     }
 
-    fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
+    fn menu(&self) -> Vec<Item> {
         use ksni::menu::{CheckmarkItem, MenuItem, StandardItem, SubMenu};
 
-        let mut items: Vec<MenuItem<Self>> = Vec::new();
+        let mut items: Vec<Item> = Vec::new();
 
         // ── status line ──────────────────────────────────────────────────────
         items.push(
@@ -137,144 +183,66 @@ impl ksni::Tray for MyVoiceTray {
         items.push(MenuItem::Separator);
 
         // ── Model submenu ────────────────────────────────────────────────────
-        let model_items: Vec<MenuItem<Self>> = self
+        let mut model_submenu: Vec<Item> = self
             .menu
             .models
             .iter()
             .map(|m| {
                 let name = m.name.clone();
-                let indicator = if m.active { "●" } else if m.downloaded { "○" } else { "  " };
                 let label = if m.downloaded {
-                    format!("{indicator} {}", m.label)
+                    m.label.clone()
                 } else {
-                    format!("{indicator} {}  (not downloaded)", m.label)
+                    format!("{}  —  not downloaded", m.label)
                 };
-                StandardItem {
-                    label,
-                    enabled: !m.active,
-                    activate: Box::new(move |this: &mut Self| {
-                        let _ = this.cmd_tx.send(UiCommand::SetModel(name.clone()));
-                    }),
-                    ..Default::default()
-                }
-                .into()
+                option_row(label, m.active, true, move |this: &mut MyVoiceTray| {
+                    let _ = this.cmd_tx.send(UiCommand::SetModel(name.clone()));
+                })
             })
             .collect();
-
-        // Show downloading progress inside the model submenu when relevant.
-        let mut model_submenu = model_items;
         if let TrayState::Downloading { pct } = &self.state {
             model_submenu.push(MenuItem::Separator);
-            model_submenu.push(
-                StandardItem {
-                    label: format!("  Downloading…  {pct}%"),
-                    enabled: false,
-                    ..Default::default()
-                }
-                .into(),
-            );
+            model_submenu.push(hint_line(&format!("Downloading…  {pct}%")));
         }
+        items.push(SubMenu { label: "Model".into(), submenu: model_submenu, ..Default::default() }.into());
 
-        items.push(
-            SubMenu {
-                label: "Model".into(),
-                submenu: model_submenu,
+        // ── Microphone submenu ────────────────────────────────────────────────
+        let active_device = self.menu.active_device.clone();
+        let mut mic_items: Vec<Item> = vec![option_row(
+            "System default".into(),
+            active_device.is_empty(),
+            true,
+            |this: &mut MyVoiceTray| {
+                let _ = this.cmd_tx.send(UiCommand::SetAudioDevice(String::new()));
+            },
+        )];
+        for dev in &self.menu.audio_devices {
+            let selected = dev.value == active_device && !active_device.is_empty();
+            let value = dev.value.clone();
+            mic_items.push(option_row(dev.label.clone(), selected, true, move |this: &mut MyVoiceTray| {
+                let _ = this.cmd_tx.send(UiCommand::SetAudioDevice(value.clone()));
+            }));
+        }
+        items.push(SubMenu { label: "Microphone".into(), submenu: mic_items, ..Default::default() }.into());
+
+        // ── Hotkeys submenu ───────────────────────────────────────────────────
+        let mut hk_items: Vec<Item> = Vec::new();
+        hk_items.push(hint_line(&format!("Recording key:  {}", display_hotkey(&self.menu.hotkey))));
+        hk_items.push(
+            StandardItem {
+                label: "Set keybind…".into(),
+                activate: Box::new(|this: &mut MyVoiceTray| {
+                    let _ = this.cmd_tx.send(UiCommand::CaptureHotkey);
+                }),
                 ..Default::default()
             }
             .into(),
         );
-
-        // ── Microphone submenu ────────────────────────────────────────────────
-        let active_device = self.menu.active_device.clone();
-        let mut mic_items: Vec<MenuItem<Self>> = vec![StandardItem {
-            label: if active_device.is_empty() {
-                "● System default".into()
-            } else {
-                "  System default".into()
-            },
-            enabled: !active_device.is_empty(),
-            activate: Box::new(|this: &mut Self| {
-                let _ = this.cmd_tx.send(UiCommand::SetAudioDevice(String::new()));
-            }),
-            ..Default::default()
-        }
-        .into()];
-
-        for dev in &self.menu.audio_devices {
-            let selected = *dev == active_device && !active_device.is_empty();
-            let ind = if selected { "●" } else { "  " };
-            let dev_clone = dev.clone();
-            mic_items.push(
-                StandardItem {
-                    label: format!("{ind} {dev}"),
-                    enabled: !selected,
-                    activate: Box::new(move |this: &mut Self| {
-                        let _ = this.cmd_tx.send(UiCommand::SetAudioDevice(dev_clone.clone()));
-                    }),
-                    ..Default::default()
-                }
-                .into(),
-            );
-        }
-
-        items.push(SubMenu { label: "Microphone".into(), submenu: mic_items, ..Default::default() }.into());
-
-        // ── Hotkey submenu ────────────────────────────────────────────────────
-        let current_hk = self.menu.hotkey.clone();
-        let hk_items: Vec<MenuItem<Self>> = HOTKEY_OPTIONS
-            .iter()
-            .map(|&hk| {
-                let selected = hk == current_hk;
-                let ind = if selected { "●" } else { "  " };
-                let hk_s = hk.to_string();
-                StandardItem {
-                    label: format!("{ind} {hk}"),
-                    enabled: !selected,
-                    activate: Box::new(move |this: &mut Self| {
-                        let _ = this.cmd_tx.send(UiCommand::SetHotkey(hk_s.clone()));
-                    }),
-                    ..Default::default()
-                }
-                .into()
-            })
-            .collect();
-
-        items.push(SubMenu { label: "Hotkey".into(), submenu: hk_items, ..Default::default() }.into());
-
-        // ── Inject as submenu ─────────────────────────────────────────────────
-        let injection = self.menu.injection.clone();
-        let inject_options = [
-            ("auto", "Type directly (auto-detect)"),
-            ("clipboard", "Copy to clipboard"),
-        ];
-        let inject_items: Vec<MenuItem<Self>> = inject_options
-            .iter()
-            .map(|&(val, label)| {
-                let selected = val == injection;
-                let ind = if selected { "●" } else { "  " };
-                let val_s = val.to_string();
-                StandardItem {
-                    label: format!("{ind} {label}"),
-                    enabled: !selected,
-                    activate: Box::new(move |this: &mut Self| {
-                        let _ = this.cmd_tx.send(UiCommand::SetInjection(val_s.clone()));
-                    }),
-                    ..Default::default()
-                }
-                .into()
-            })
-            .collect();
-
-        items.push(SubMenu { label: "Inject as".into(), submenu: inject_items, ..Default::default() }.into());
-
-        items.push(MenuItem::Separator);
-
-        // ── Clipboard shortcut toggle ─────────────────────────────────────────
-        items.push(
+        hk_items.push(MenuItem::Separator);
+        hk_items.push(
             CheckmarkItem {
-                label: "Clipboard shortcut  (Shift+hotkey)".into(),
+                label: "Clipboard shortcut".into(),
                 checked: self.menu.clipboard_hotkey,
-                activate: Box::new(|this: &mut Self| {
+                activate: Box::new(|this: &mut MyVoiceTray| {
                     let new_val = !this.menu.clipboard_hotkey;
                     let _ = this.cmd_tx.send(UiCommand::SetClipboardHotkey(new_val));
                 }),
@@ -282,25 +250,68 @@ impl ksni::Tray for MyVoiceTray {
             }
             .into(),
         );
-
-        // Start at Login — stub until §7 is implemented.
-        items.push(
-            StandardItem {
-                label: "Start at Login".into(),
-                enabled: false,
+        hk_items.push(hint_line("Hold Shift + hotkey to copy instead of type"));
+        hk_items.push(MenuItem::Separator);
+        hk_items.push(
+            CheckmarkItem {
+                label: "Reserve the hotkey".into(),
+                checked: self.menu.grab,
+                activate: Box::new(|this: &mut MyVoiceTray| {
+                    let new_val = !this.menu.grab;
+                    let _ = this.cmd_tx.send(UiCommand::SetGrab(new_val));
+                }),
                 ..Default::default()
             }
             .into(),
         );
+        hk_items.push(hint_line("Stops the key doing its normal job (e.g. Caps Lock)"));
+        items.push(SubMenu { label: "Hotkeys".into(), submenu: hk_items, ..Default::default() }.into());
 
-        // Grab mode toggle (Linux only).
+        // ── Paste mode submenu ────────────────────────────────────────────────
+        let injection = self.menu.injection.clone();
+        let type_available = self.menu.inject_type_available;
+        // When typing is unavailable the daemon falls back to clipboard at
+        // runtime, so reflect that: clipboard is the effective current mode and
+        // "Paste at cursor" is shown locked rather than selected.
+        let paste_selected = injection != "clipboard" && type_available;
+        let clipboard_selected = injection == "clipboard" || !type_available;
+        let mut paste_items: Vec<Item> = Vec::new();
+        paste_items.push(option_row(
+            "Paste at cursor".into(),
+            paste_selected,
+            type_available,
+            |this: &mut MyVoiceTray| {
+                let _ = this.cmd_tx.send(UiCommand::SetInjection("auto".into()));
+            },
+        ));
+        if type_available {
+            paste_items.push(hint_line("Falls back to clipboard if the cursor can't take it"));
+        } else {
+            paste_items.push(hint_line("Locked — needs a typing tool:"));
+            for line in self.menu.inject_unlock_hint.lines() {
+                paste_items.push(hint_line(line));
+            }
+        }
+        paste_items.push(option_row(
+            "Copy to clipboard".into(),
+            clipboard_selected,
+            true,
+            |this: &mut MyVoiceTray| {
+                let _ = this.cmd_tx.send(UiCommand::SetInjection("clipboard".into()));
+            },
+        ));
+        items.push(SubMenu { label: "Paste mode".into(), submenu: paste_items, ..Default::default() }.into());
+
+        items.push(MenuItem::Separator);
+
+        // ── Start at Login ────────────────────────────────────────────────────
         items.push(
             CheckmarkItem {
-                label: "Grab mode  (advanced)".into(),
-                checked: self.menu.grab,
-                activate: Box::new(|this: &mut Self| {
-                    let new_val = !this.menu.grab;
-                    let _ = this.cmd_tx.send(UiCommand::SetGrab(new_val));
+                label: "Start at login".into(),
+                checked: self.menu.start_at_login,
+                activate: Box::new(|this: &mut MyVoiceTray| {
+                    let new_val = !this.menu.start_at_login;
+                    let _ = this.cmd_tx.send(UiCommand::SetStartAtLogin(new_val));
                 }),
                 ..Default::default()
             }
@@ -312,7 +323,7 @@ impl ksni::Tray for MyVoiceTray {
         items.push(
             StandardItem {
                 label: "Quit".into(),
-                activate: Box::new(|this: &mut Self| {
+                activate: Box::new(|this: &mut MyVoiceTray| {
                     let _ = this.cmd_tx.send(UiCommand::Quit);
                 }),
                 ..Default::default()
@@ -324,12 +335,20 @@ impl ksni::Tray for MyVoiceTray {
     }
 }
 
+/// Prettify a hotkey config string for display (e.g. `Ctrl+Period` → `Ctrl + Period`).
+fn display_hotkey(hk: &str) -> String {
+    if hk.is_empty() {
+        return "—".into();
+    }
+    hk.split('+').collect::<Vec<_>>().join(" + ")
+}
+
 fn status_label(state: &TrayState) -> String {
     match state {
-        TrayState::Ready => "● Ready".into(),
-        TrayState::Listening => "● Listening…".into(),
-        TrayState::Transcribing => "● Transcribing…".into(),
-        TrayState::Downloading { pct } => format!("● Downloading… {pct}%"),
+        TrayState::Ready => "Ready".into(),
+        TrayState::Listening => "Listening…".into(),
+        TrayState::Transcribing => "Transcribing…".into(),
+        TrayState::Downloading { pct } => format!("Downloading… {pct}%"),
         TrayState::Error(msg) => format!("⚠ {msg}"),
     }
 }

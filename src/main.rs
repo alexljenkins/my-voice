@@ -1,8 +1,11 @@
 mod audio;
+mod autostart;
 mod config;
 mod download;
 mod hotkey;
 mod injector;
+#[cfg(target_os = "linux")]
+mod keybind_capture;
 mod model_cache;
 mod models;
 mod notify;
@@ -59,6 +62,12 @@ struct Cli {
     #[arg(long)]
     list_devices: bool,
 
+    /// Open the key-capture popup, write the chosen hotkey to config, exit.
+    /// Spawned as a subprocess by the tray's "Set keybind…"; not for direct use.
+    #[cfg(target_os = "linux")]
+    #[arg(long, hide = true)]
+    set_hotkey: bool,
+
     /// Alternate config file.
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
@@ -74,7 +83,11 @@ fn main() {
     let debug_invocation = cli.test || cli.wav.is_some();
     #[cfg(not(feature = "debug-tools"))]
     let debug_invocation = false;
-    let is_daemon = !cli.download && !debug_invocation && !cli.list_devices;
+    #[cfg(target_os = "linux")]
+    let set_hotkey = cli.set_hotkey;
+    #[cfg(not(target_os = "linux"))]
+    let set_hotkey = false;
+    let is_daemon = !cli.download && !debug_invocation && !cli.list_devices && !set_hotkey;
     let _log_guard = init_tracing(cli.verbose, is_daemon);
 
     if let Err(e) = run(cli) {
@@ -86,6 +99,11 @@ fn main() {
 fn run(cli: Cli) -> Result<()> {
     if cli.list_devices {
         return audio::list_devices();
+    }
+
+    #[cfg(target_os = "linux")]
+    if cli.set_hotkey {
+        return run_set_hotkey(cli.config.as_deref());
     }
 
     let config = Config::load(cli.config.as_deref())?;
@@ -106,6 +124,27 @@ fn run(cli: Cli) -> Result<()> {
     }
 
     run_daemon(config, cli.config, cli.record)
+}
+
+/// Subprocess entry for the tray's "Set keybind…": open the capture popup, and
+/// if the user commits a key, persist it and exit 0; on cancel exit 10 so the
+/// parent daemon knows not to restart. Runs its own (winit) event loop, which is
+/// why it's a separate process rather than a thread inside the daemon.
+#[cfg(target_os = "linux")]
+fn run_set_hotkey(config_path: Option<&Path>) -> Result<()> {
+    match keybind_capture::capture()? {
+        Some(hotkey) => {
+            let mut config = Config::load(config_path)?;
+            config.hotkey = hotkey.clone();
+            config.save(config_path)?;
+            info!("hotkey set to '{hotkey}'");
+            std::process::exit(0);
+        }
+        None => {
+            info!("hotkey capture cancelled");
+            std::process::exit(10);
+        }
+    }
 }
 
 /// Feed a wav file straight through the transcriber — isolates the inference
@@ -171,6 +210,9 @@ enum DaemonMsg {
     DownloadProgress(u8),
     DownloadComplete,
     DownloadFailed(String),
+    /// The keybind-capture subprocess committed a new hotkey to disk.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    HotkeyCaptured,
 }
 
 fn run_daemon(mut config: Config, config_path: Option<PathBuf>, record_dir: Option<PathBuf>) -> Result<()> {
@@ -210,7 +252,7 @@ fn run_daemon(mut config: Config, config_path: Option<PathBuf>, record_dir: Opti
     let mut clipper = injector::clipboard();
 
     // Enumerate input devices once at startup for the tray mic submenu.
-    let audio_devices = audio::input_device_names();
+    let audio_devices = audio::input_devices();
 
     #[cfg(unix)]
     install_signal_handlers();
@@ -377,6 +419,31 @@ fn run_daemon(mut config: Config, config_path: Option<PathBuf>, record_dir: Opti
                 info!("quit requested");
                 break;
             }
+
+            // "Set keybind…": launch the capture popup as a subprocess. It writes
+            // the chosen hotkey to disk and exits; HotkeyCaptured then restarts us.
+            DaemonMsg::Ui(UiCommand::CaptureHotkey) => {
+                #[cfg(target_os = "linux")]
+                spawn_keybind_capture(config_path.clone(), daemon_tx.clone());
+            }
+            DaemonMsg::HotkeyCaptured => {
+                info!("hotkey changed via popup — restarting to apply");
+                hotkey::restore_platform();
+                restart_self();
+            }
+
+            // Start at login is a filesystem side effect (XDG autostart entry),
+            // not config — apply immediately and refresh the menu's checkmark.
+            DaemonMsg::Ui(UiCommand::SetStartAtLogin(on)) => {
+                match autostart::set_enabled(on) {
+                    Ok(()) => info!("start at login: {on}"),
+                    Err(e) => {
+                        warn!("start-at-login toggle failed: {e:#}");
+                        ui.set_state(TrayState::Error("Couldn't change start-at-login".into()));
+                    }
+                }
+                ui.set_menu(build_tray_menu(&config, &audio_devices));
+            }
             DaemonMsg::Ui(UiCommand::ReloadConfig) => match state {
                 State::Idle => apply_reload(
                     &mut config,
@@ -391,16 +458,9 @@ fn run_daemon(mut config: Config, config_path: Option<PathBuf>, record_dir: Opti
                 State::Recording { .. } => pending_reload = true,
             },
 
-            // Settings changes that require a self-restart (hotkey/grab backend
-            // threads can't be torn down live). Write to disk before restarting
-            // so the fresh process picks up the new value.
-            DaemonMsg::Ui(UiCommand::SetHotkey(hk)) => {
-                let mut updated = config.clone();
-                updated.hotkey = hk;
-                save_config(&updated, config_path.as_deref());
-                hotkey::restore_platform();
-                restart_self();
-            }
+            // Settings changes that require a self-restart (grab backend threads
+            // can't be torn down live). Write to disk before restarting so the
+            // fresh process picks up the new value.
             DaemonMsg::Ui(UiCommand::SetGrab(g)) => {
                 let mut updated = config.clone();
                 updated.grab = g;
@@ -495,7 +555,7 @@ fn apply_reload(
     cache: &mut Arc<ModelCache>,
     trailing: &mut Duration,
     ui: &UiHandle,
-    audio_devices: &[String],
+    audio_devices: &[audio::AudioDevice],
 ) {
     let new = match Config::load(config_path) {
         Ok(c) => c,
@@ -546,7 +606,7 @@ fn save_config(config: &Config, path: Option<&Path>) {
 }
 
 /// Build the tray menu state from the current config and available devices.
-fn build_tray_menu(config: &Config, audio_devices: &[String]) -> TrayMenuState {
+fn build_tray_menu(config: &Config, audio_devices: &[audio::AudioDevice]) -> TrayMenuState {
     let model_dir = config.resolved_model_dir();
     let models = models::MODELS
         .iter()
@@ -571,33 +631,88 @@ fn build_tray_menu(config: &Config, audio_devices: &[String]) -> TrayMenuState {
         })
         .collect();
 
+    let devices = audio_devices
+        .iter()
+        .map(|d| ui::DeviceItem { value: d.value.clone(), label: d.label.clone() })
+        .collect();
+    let (inject_type_available, inject_unlock_hint) = injector::typing_availability();
+
     TrayMenuState {
         models,
-        audio_devices: audio_devices.to_vec(),
+        audio_devices: devices,
         active_device: config.audio_device.clone(),
         hotkey: config.hotkey.clone(),
         injection: config.injection.clone(),
+        inject_type_available,
+        inject_unlock_hint,
         grab: config.grab,
         clipboard_hotkey: config.clipboard_hotkey,
+        start_at_login: autostart::is_enabled(),
     }
 }
 
-/// Re-exec the current binary in place. The single-instance flock is CLOEXEC,
-/// so it releases on exec and the fresh process re-acquires it. Used as the v1
-/// fallback for hotkey/grab changes (§1).
+/// Spawn the keybind-capture popup as a subprocess and, if it commits a new
+/// hotkey (exit 0), signal the daemon to restart so the new hotkey takes effect.
+#[cfg(target_os = "linux")]
+fn spawn_keybind_capture(config_path: Option<PathBuf>, tx: mpsc::Sender<DaemonMsg>) {
+    thread::spawn(move || {
+        let exe = match std::env::current_exe() {
+            Ok(e) => e,
+            Err(e) => {
+                warn!("current_exe failed, can't open keybind popup: {e}");
+                return;
+            }
+        };
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("--set-hotkey");
+        if let Some(p) = config_path {
+            cmd.arg("--config").arg(p);
+        }
+        match cmd.status() {
+            Ok(st) if st.success() => {
+                let _ = tx.send(DaemonMsg::HotkeyCaptured);
+            }
+            Ok(_) => debug!("keybind capture cancelled"),
+            Err(e) => warn!("keybind popup failed to launch: {e:#}"),
+        }
+    });
+}
+
+/// Restart the daemon to apply a hotkey/grab change (§1). Spawns a *fresh child
+/// process* (new PID) then exits, rather than `exec`-ing in place.
+///
+/// Why a new process and not `exec`: the Linux tray is a ksni StatusNotifierItem
+/// whose D-Bus name is `org.kde.StatusNotifierItem-{PID}-{counter}`, and the
+/// per-process counter restarts at 1 each launch. `exec` keeps the same PID, so
+/// the fresh image re-registered the *identical* bus name the dying one just
+/// held — the tray host then pruned it as a stale duplicate and the icon vanished
+/// even though the daemon was running. A new PID yields a new SNI name, so the
+/// host shows it as a genuinely new item.
+///
+/// The child is launched with `MY_VOICE_RESTART=1` so its single-instance lock
+/// acquire retries briefly: parent and child overlap for the few ms until the
+/// parent exits and releases the flock.
 #[cfg(unix)]
 fn restart_self() -> ! {
-    use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe().unwrap_or_else(|e| {
         warn!("current_exe failed, cannot restart: {e}");
         std::process::exit(1);
     });
     let args: Vec<String> = std::env::args().skip(1).collect();
     hotkey::restore_platform();
-    let err = std::process::Command::new(exe).args(args).exec();
-    // exec() only returns on failure.
-    warn!("re-exec failed: {err}");
-    std::process::exit(1);
+    match std::process::Command::new(exe)
+        .args(args)
+        .env("MY_VOICE_RESTART", "1")
+        .spawn()
+    {
+        // Parent exits immediately so its fds (evdev grab, D-Bus connection, the
+        // flock) close before the child finishes its longer startup and grabs.
+        Ok(_) => std::process::exit(0),
+        Err(e) => {
+            warn!("respawn failed: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -750,7 +865,7 @@ mod single_instance {
     use std::os::unix::io::AsRawFd;
     use std::path::PathBuf;
 
-    use anyhow::{bail, Result};
+    use anyhow::Result;
 
     /// Held for the process lifetime — dropping it (or process exit) releases
     /// the lock.
@@ -769,6 +884,30 @@ mod single_instance {
     }
 
     pub fn acquire() -> Result<Guard> {
+        // A self-restart (hotkey/grab change) spawns the fresh process *before*
+        // the old one exits, so the two briefly overlap. The child is launched
+        // with MY_VOICE_RESTART=1; in that case retry the lock for a short window
+        // to let the parent exit and release it, rather than failing as a dupe.
+        let restarting = std::env::var_os("MY_VOICE_RESTART").is_some();
+        std::env::remove_var("MY_VOICE_RESTART");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match try_acquire()? {
+                Some(guard) => return Ok(guard),
+                None => {
+                    if restarting && std::time::Instant::now() < deadline {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        continue;
+                    }
+                    return Err(already_running());
+                }
+            }
+        }
+    }
+
+    /// One non-blocking acquire attempt. `Ok(Some)` = held, `Ok(None)` = the lock
+    /// is busy (another instance holds it), `Err` = a hard filesystem error.
+    fn try_acquire() -> Result<Option<Guard>> {
         let path = lock_path();
         let mut file = OpenOptions::new()
             .read(true)
@@ -777,21 +916,15 @@ mod single_instance {
             .truncate(false)
             .open(&path)?;
 
-        // CLOEXEC so a self-restart (exec) releases the lock for the fresh
-        // process; without it the re-exec'd daemon would deadlock on its own lock.
+        // CLOEXEC so a restart's spawned child doesn't inherit this fd (it opens
+        // its own), and so any subprocess we launch can't hold the lock open.
         unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
 
         let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         if rc != 0 {
             let err = std::io::Error::last_os_error();
             if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
-                let mut existing = String::new();
-                let _ = file.read_to_string(&mut existing);
-                let pid = existing.trim();
-                if pid.is_empty() {
-                    bail!("my-voice is already running");
-                }
-                bail!("my-voice is already running (pid {pid})");
+                return Ok(None);
             }
             return Err(err.into());
         }
@@ -799,7 +932,22 @@ mod single_instance {
         // We hold the lock: record our pid.
         let _ = file.set_len(0);
         let _ = writeln!(file, "{}", std::process::id());
-        Ok(Guard { _file: file })
+        Ok(Some(Guard { _file: file }))
+    }
+
+    /// Build the user-facing "already running" error, naming the holding pid if
+    /// the lock file records one.
+    fn already_running() -> anyhow::Error {
+        let mut existing = String::new();
+        if let Ok(mut file) = File::open(lock_path()) {
+            let _ = file.read_to_string(&mut existing);
+        }
+        let pid = existing.trim();
+        if pid.is_empty() {
+            anyhow::anyhow!("my-voice is already running")
+        } else {
+            anyhow::anyhow!("my-voice is already running (pid {pid})")
+        }
     }
 }
 

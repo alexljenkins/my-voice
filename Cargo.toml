@@ -52,8 +52,16 @@ zbus = "5"               # pure-Rust D-Bus (blocking API) for AT-SPI injection
 ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
 # pure-Rust X11 protocol impl for XGrabKey hotkey backend (no C xcb/x11 libs).
 x11rb = { version = "0.13", default-features = false }
+# pure-Rust PNG encoder for per-menu-item icons (the green "selected" dot).
+png = "0.17"
 # pure-Rust D-Bus desktop notifications (z feature = zbus backend, no C libdbus).
 notify-rust = { version = "4", default-features = false, features = ["z"] }
+# keybind-capture popup ("Set keybind…"). winit window + softbuffer CPU surface +
+# ab_glyph runtime system-font rasterizer. No GTK, no wgpu/egui. Wayland + X11.
+winit = "0.30"
+softbuffer = "0.4"
+ab_glyph = "0.2"
+raw-window-handle = "0.6"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.24"

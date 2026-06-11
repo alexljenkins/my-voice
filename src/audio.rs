@@ -386,17 +386,122 @@ pub fn list_devices() -> Result<()> {
     Ok(())
 }
 
-/// Return names of all available input devices. Empty on enumeration failure.
-pub fn input_device_names() -> Vec<String> {
+/// A selectable input device for the tray menu: `value` is matched (substring)
+/// against `cpal` device names in `select_device`; `label` is what the user sees.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioDevice {
+    pub value: String,
+    pub label: String,
+}
+
+/// Curated list of input devices for the tray menu. Raw ALSA enumeration is full
+/// of plumbing PCMs (`hw:`, `front:`, `surround*`, `dsnoop:`, `sysdefault:`, …);
+/// we keep only entries a human would recognise:
+///   • one entry per physical sound card, labelled from `/proc/asound/cards`,
+///     routed through `plughw:CARD=<id>` (format-converting, most compatible);
+///   • the high-level server PCMs (`pipewire`, `pulse`) shown by friendly name.
+/// Everything else is dropped. Empty on enumeration failure.
+pub fn input_devices() -> Vec<AudioDevice> {
     let host = cpal::default_host();
-    host.input_devices()
-        .map(|devices| devices.filter_map(|d| d.name().ok()).collect())
-        .unwrap_or_default()
+    let Ok(devices) = host.input_devices() else {
+        return Vec::new();
+    };
+    let names: Vec<String> = devices.filter_map(|d| d.name().ok()).collect();
+    let card_names = card_friendly_names();
+
+    let mut out: Vec<AudioDevice> = Vec::new();
+    let mut seen_cards: Vec<String> = Vec::new();
+
+    for name in &names {
+        // High-level server PCMs: keep, prettify, dedupe.
+        if let Some(label) = high_level_label(name) {
+            if !out.iter().any(|d| d.label == label) {
+                out.push(AudioDevice { value: name.clone(), label });
+            }
+            continue;
+        }
+        // ALSA hardware PCM: collapse to one entry per card.
+        if let Some(card) = card_id(name) {
+            if seen_cards.iter().any(|c| c == card) {
+                continue;
+            }
+            seen_cards.push(card.to_string());
+            let label = card_names.get(card).cloned().unwrap_or_else(|| card.to_string());
+            out.push(AudioDevice {
+                value: format!("plughw:CARD={card}"),
+                label,
+            });
+        }
+        // Anything else (raw `hw:`, `front:`, `surround*`, `dsnoop:`, …): dropped.
+    }
+    out
+}
+
+/// Friendly server-PCM label for the well-known high-level device names, else None.
+fn high_level_label(name: &str) -> Option<String> {
+    match name {
+        "pipewire" => Some("PipeWire".into()),
+        "pulse" => Some("PulseAudio".into()),
+        "jack" => Some("JACK".into()),
+        _ => None,
+    }
+}
+
+/// Extract the `CARD=<id>` token from an ALSA PCM name (e.g. `plughw:CARD=PCH,DEV=0`).
+fn card_id(name: &str) -> Option<&str> {
+    let rest = name.split("CARD=").nth(1)?;
+    Some(rest.split([',', ' ']).next().unwrap_or(rest))
+}
+
+/// Parse `/proc/asound/cards` into a card-id → friendly-name map. The friendly
+/// name is the descriptive tail of each card's first line. Empty off Linux or on
+/// read failure (callers fall back to the raw card id).
+fn card_friendly_names() -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    let Ok(text) = std::fs::read_to_string("/proc/asound/cards") else {
+        return map;
+    };
+    // Lines look like: ` 1 [Snowball       ]: USB-Audio - Blue Snowball`
+    for line in text.lines() {
+        let Some(open) = line.find('[') else { continue };
+        let Some(close) = line.find(']') else { continue };
+        if close < open {
+            continue;
+        }
+        let id = line[open + 1..close].trim().to_string();
+        if id.is_empty() {
+            continue;
+        }
+        let friendly = line[close + 1..]
+            .split(" - ")
+            .nth(1)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&id)
+            .to_string();
+        map.entry(id).or_insert(friendly);
+    }
+    map
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_audio_processing, resample};
+    use super::{apply_audio_processing, card_id, high_level_label, resample};
+
+    #[test]
+    fn card_id_extracts_token() {
+        assert_eq!(card_id("plughw:CARD=PCH,DEV=0"), Some("PCH"));
+        assert_eq!(card_id("hw:CARD=Snowball,DEV=0"), Some("Snowball"));
+        assert_eq!(card_id("sysdefault:CARD=PCH"), Some("PCH"));
+        assert_eq!(card_id("pipewire"), None);
+    }
+
+    #[test]
+    fn high_level_labels() {
+        assert_eq!(high_level_label("pipewire").as_deref(), Some("PipeWire"));
+        assert_eq!(high_level_label("pulse").as_deref(), Some("PulseAudio"));
+        assert_eq!(high_level_label("hw:CARD=PCH,DEV=0"), None);
+    }
 
     #[test]
     fn resample_identity() {

@@ -39,20 +39,35 @@ pub struct ModelItem {
     pub downloaded: bool,
 }
 
+/// One selectable input device in the microphone submenu. `value` is what gets
+/// saved to config (substring-matched against the cpal device name); `label` is
+/// the friendly name shown to the user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceItem {
+    pub value: String,
+    pub label: String,
+}
+
 /// Configuration state the daemon pushes into the tray to drive menu rendering.
 /// All fields default to empty/off so the tray can start before the daemon
 /// pushes real state.
 #[derive(Debug, Clone, Default)]
 pub struct TrayMenuState {
     pub models: Vec<ModelItem>,
-    /// All available input device names (enumerated at startup).
-    pub audio_devices: Vec<String>,
+    /// Curated input devices (enumerated at startup).
+    pub audio_devices: Vec<DeviceItem>,
     /// Currently configured device (empty string = system default).
     pub active_device: String,
     pub hotkey: String,
     pub injection: String,
+    /// Whether a real typing tool is available so "Paste at cursor" can work.
+    pub inject_type_available: bool,
+    /// Plain-language unlock instructions shown when typing is unavailable.
+    pub inject_unlock_hint: String,
     pub grab: bool,
     pub clipboard_hotkey: bool,
+    /// Whether the XDG autostart entry is currently installed.
+    pub start_at_login: bool,
 }
 
 /// Commands the UI sends back to the daemon.
@@ -64,12 +79,14 @@ pub enum UiCommand {
     SetAudioDevice(String),
     /// Change injection mode ("auto" | "clipboard").
     SetInjection(String),
-    /// Change hotkey — requires daemon restart to take effect.
-    SetHotkey(String),
     /// Toggle grab mode — requires daemon restart to take effect.
     SetGrab(bool),
     /// Toggle whether Shift+hotkey copies to clipboard instead of typing.
     SetClipboardHotkey(bool),
+    /// Open the key-capture popup, then apply the chosen hotkey (self-restart).
+    CaptureHotkey,
+    /// Enable/disable launching at login (XDG autostart entry).
+    SetStartAtLogin(bool),
     /// Config file changed on disk; reload and re-apply live between utterances.
     #[allow(dead_code)]
     ReloadConfig,
