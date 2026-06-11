@@ -102,10 +102,13 @@ impl Config {
         }
     }
 
-    /// Resolve `threads`: 0 = auto = min(num_cpus, 4). [voxtype]
+    /// Resolve `threads`: 0 = auto = min(num_cpus, 8). Measured on an 8-logical
+    /// (4-physical) i7-8565U: 8 intra-op threads cut encode ~10% vs 4 with no
+    /// decode change, so SMT oversubscription helps; capped at 8 since wide
+    /// intra-op parallelism regresses on big machines.
     pub fn resolved_threads(&self) -> usize {
         if self.threads == 0 {
-            num_cpus::get().min(4)
+            num_cpus::get().min(8)
         } else {
             self.threads
         }
@@ -228,9 +231,9 @@ mod tests {
     }
 
     #[test]
-    fn threads_auto_caps_at_four() {
+    fn threads_auto_caps_at_eight() {
         let cfg = Config::default();
         assert!(cfg.resolved_threads() >= 1);
-        assert!(cfg.resolved_threads() <= 4);
+        assert!(cfg.resolved_threads() <= 8);
     }
 }
