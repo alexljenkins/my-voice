@@ -179,6 +179,8 @@ audio_device = ""           # substring match against device name; "" = system d
 min_speech_ms = 300         # discard holds shorter than this (prevents accidental triggers)
 trailing_silence_ms = 150   # extra audio captured after release (catches word endings)
 injection = "auto"          # auto | wtype | xdotool | ydotool | atspi | clipboard
+corrections = []            # whole-word, case-insensitive fixes, e.g.
+                            # [["git hub", "GitHub"], ["my voice", "my-voice"]]
 ```
 
 Unknown keys are warned and ignored.
