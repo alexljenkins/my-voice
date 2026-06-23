@@ -62,6 +62,18 @@ struct Cli {
     #[arg(long)]
     list_devices: bool,
 
+    /// Report whether a daemon is running (with its pid + configured model), exit.
+    #[arg(long)]
+    status: bool,
+
+    /// Print a shell completion script for SHELL to stdout, exit.
+    #[arg(long, value_name = "SHELL")]
+    completions: Option<clap_complete::Shell>,
+
+    /// Print a roff man page to stdout, exit.
+    #[arg(long, hide = true)]
+    man: bool,
+
     /// Open the key-capture popup, write the chosen hotkey to config, exit.
     /// Spawned as a subprocess by the tray's "Set keybind…"; not for direct use.
     #[cfg(target_os = "linux")]
@@ -87,7 +99,13 @@ fn main() {
     let set_hotkey = cli.set_hotkey;
     #[cfg(not(target_os = "linux"))]
     let set_hotkey = false;
-    let is_daemon = !cli.download && !debug_invocation && !cli.list_devices && !set_hotkey;
+    let is_daemon = !cli.download
+        && !debug_invocation
+        && !cli.list_devices
+        && !cli.status
+        && cli.completions.is_none()
+        && !cli.man
+        && !set_hotkey;
     let _log_guard = init_tracing(cli.verbose, is_daemon);
 
     if let Err(e) = run(cli) {
@@ -101,12 +119,27 @@ fn run(cli: Cli) -> Result<()> {
         return audio::list_devices();
     }
 
+    if let Some(shell) = cli.completions {
+        print_completions(shell);
+        return Ok(());
+    }
+
+    if cli.man {
+        return print_man();
+    }
+
     #[cfg(target_os = "linux")]
     if cli.set_hotkey {
         return run_set_hotkey(cli.config.as_deref());
     }
 
     let config = Config::load(cli.config.as_deref())?;
+
+    if cli.status {
+        print_status(&config);
+        return Ok(());
+    }
+
     debug!(?config, "loaded config");
 
     if cli.download {
@@ -124,6 +157,49 @@ fn run(cli: Cli) -> Result<()> {
     }
 
     run_daemon(config, cli.config, cli.record)
+}
+
+/// Emit a shell completion script for the derived `Cli` to stdout. Pure
+/// generation — never touches the daemon or the hot path.
+fn print_completions(shell: clap_complete::Shell) {
+    use clap::CommandFactory;
+    let mut cmd = Cli::command();
+    let name = cmd.get_name().to_string();
+    clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
+}
+
+/// Emit a roff man page for the derived `Cli` to stdout (for packaging).
+fn print_man() -> Result<()> {
+    use clap::CommandFactory;
+    clap_mangen::Man::new(Cli::command()).render(&mut std::io::stdout())?;
+    Ok(())
+}
+
+/// Report whether a daemon is running. The lockfile records the holder's pid on
+/// line 1 (single_instance::try_acquire); a `kill(pid, 0)` confirms it's alive.
+fn print_status(config: &Config) {
+    let pid = single_instance::lock_pid();
+    let alive = pid.is_some_and(process_alive);
+    println!("{}", status_line(pid.filter(|_| alive), &config.model));
+}
+
+/// Format the one-line status report. Split out so it's unit-testable without a
+/// live daemon: a present pid means running, `None` means not.
+fn status_line(pid: Option<i32>, model: &str) -> String {
+    match pid {
+        Some(pid) => format!("running (pid {pid}), model {model}"),
+        None => "not running".to_string(),
+    }
+}
+
+/// Signal-0 liveness probe: the process exists (or we lack permission to signal
+/// a process that does). ESRCH alone means dead.
+#[cfg(unix)]
+fn process_alive(pid: i32) -> bool {
+    unsafe {
+        libc::kill(pid, 0) == 0
+            || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
 }
 
 /// Subprocess entry for the tray's "Set keybind…": open the capture popup, and
@@ -952,6 +1028,17 @@ mod single_instance {
         PathBuf::from(format!("/tmp/my-voice-{uid}.lock"))
     }
 
+    /// The pid recorded on line 1 of the lockfile, if the file exists and parses.
+    /// Mirrors `already_running()`'s `trim()` parser — line 1 stays a bare pid.
+    pub fn lock_pid() -> Option<i32> {
+        let mut existing = String::new();
+        File::open(lock_path())
+            .ok()?
+            .read_to_string(&mut existing)
+            .ok()?;
+        existing.lines().next()?.trim().parse().ok()
+    }
+
     pub fn acquire() -> Result<Guard> {
         // A self-restart (hotkey/grab change) spawns the fresh process *before*
         // the old one exits, so the two briefly overlap. The child is launched
@@ -1096,5 +1183,39 @@ mod tests {
             ..cfg()
         };
         assert!(reload_actions(&cfg(), &grab).restart);
+    }
+
+    #[test]
+    fn cli_definition_is_valid() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn status_line_reflects_liveness() {
+        assert_eq!(
+            status_line(Some(123), "moonshine-base"),
+            "running (pid 123), model moonshine-base"
+        );
+        assert_eq!(status_line(None, "moonshine-base"), "not running");
+    }
+
+    #[test]
+    fn completions_and_man_generate_nonempty() {
+        use clap::CommandFactory;
+        let mut bash = Vec::new();
+        clap_complete::generate(
+            clap_complete::Shell::Bash,
+            &mut Cli::command(),
+            "my-voice",
+            &mut bash,
+        );
+        assert!(bash.windows(8).any(|w| w == b"my-voice"));
+
+        let mut man = Vec::new();
+        clap_mangen::Man::new(Cli::command())
+            .render(&mut man)
+            .unwrap();
+        assert!(man.windows(8).any(|w| w == b"my-voice"));
     }
 }
