@@ -1,7 +1,7 @@
 //! AudioRecorder: cpal input stream, mono downmix, sinc/FFT resample to 16 kHz.
 //! Pipeline: native-rate capture → rubato FFT resample → WebRTC APM → peak normalize → VAD silence trim.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{anyhow, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -56,7 +56,7 @@ impl AudioRecorder {
 
     /// Open the input stream and begin appending mono samples to the buffer.
     pub fn start(&mut self) -> Result<()> {
-        self.buffer.lock().unwrap().clear();
+        lock_buf(&self.buffer).clear();
 
         let config = cpal::StreamConfig {
             channels: self.channels as u16,
@@ -112,7 +112,7 @@ impl AudioRecorder {
     /// Stop the stream and discard whatever was captured (no processing).
     pub fn cancel(&mut self) {
         self.stream = None;
-        self.buffer.lock().unwrap().clear();
+        lock_buf(&self.buffer).clear();
     }
 
     /// Stop the stream and return 16 kHz mono f32 samples in [-1, 1].
@@ -126,7 +126,7 @@ impl AudioRecorder {
     /// and is useful for writing a before/after comparison WAV.
     pub fn stop_with_raw(&mut self) -> (Vec<f32>, u32, Vec<f32>) {
         self.stream = None; // drop → stop the stream
-        let raw = std::mem::take(&mut *self.buffer.lock().unwrap());
+        let raw = std::mem::take(&mut *lock_buf(&self.buffer));
         let raw_peak = raw.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
         debug!(
             "captured {} samples at {} Hz ({:.2}s), raw peak {raw_peak:.3}",
@@ -184,6 +184,15 @@ fn select_device(host: &cpal::Host, wanted: &str) -> Result<cpal::Device> {
         .ok_or_else(|| anyhow!("no default input device (see --list-devices)"))
 }
 
+/// Lock the sample buffer, recovering from poison. The append closure runs on
+/// cpal's realtime callback thread, which swallows panics silently — a single
+/// poison would otherwise wedge every later lock and brick capture until
+/// restart, the hardest failure for a user to diagnose. The buffer is plain
+/// owned data, so recovering it and carrying on is safe.
+fn lock_buf(buf: &Mutex<Vec<f32>>) -> MutexGuard<'_, Vec<f32>> {
+    buf.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 /// Append interleaved samples to the shared buffer, converting to f32 and
 /// downmixing to mono by averaging across channels. Caps at `cap` samples.
 fn append_mono<T>(buf: &Arc<Mutex<Vec<f32>>>, data: &[T], channels: usize, cap: usize)
@@ -191,7 +200,7 @@ where
     T: Sample,
     f32: FromSample<T>,
 {
-    let mut b = buf.lock().unwrap();
+    let mut b = lock_buf(buf);
     let denom = channels.max(1) as f32;
     for frame in data.chunks(channels.max(1)) {
         if b.len() >= cap {
@@ -521,7 +530,40 @@ fn card_friendly_names() -> std::collections::HashMap<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_audio_processing, card_id, high_level_label, resample};
+    use super::{
+        append_mono, apply_audio_processing, card_id, high_level_label, lock_buf, resample,
+    };
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::sync::{Arc, Mutex};
+
+    /// Poison the buffer mutex (panic while holding it), then assert lock_buf still
+    /// hands back the data instead of unwrapping Err — the bug that would otherwise
+    /// brick capture forever after one swallowed callback-thread panic.
+    #[test]
+    fn lock_buf_recovers_from_poison() {
+        let buf = Arc::new(Mutex::new(vec![1.0f32, 2.0]));
+        let b = Arc::clone(&buf);
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _g = b.lock().unwrap();
+            panic!("poison the lock");
+        }));
+        assert!(buf.is_poisoned());
+        assert_eq!(*lock_buf(&buf), vec![1.0, 2.0]);
+    }
+
+    /// The realtime append path must keep capturing after a poison, not panic.
+    #[test]
+    fn append_mono_recovers_from_poison() {
+        let buf = Arc::new(Mutex::new(Vec::<f32>::new()));
+        let b = Arc::clone(&buf);
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _g = b.lock().unwrap();
+            panic!("poison the lock");
+        }));
+        assert!(buf.is_poisoned());
+        append_mono(&buf, &[0.5f32, 0.5], 1, 16);
+        assert_eq!(*lock_buf(&buf), vec![0.5, 0.5]);
+    }
 
     #[test]
     fn card_id_extracts_token() {
