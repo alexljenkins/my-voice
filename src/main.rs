@@ -179,7 +179,7 @@ fn run_wav(config: &Config, path: &std::path::Path) -> Result<()> {
         samples.len() as f32 / 16_000.0
     );
     let mut transcriber = transcriber::create(config)?;
-    let text = post_process(&transcriber.transcribe(&samples)?);
+    let text = post_process(&transcriber.transcribe(&samples)?, config.itn_numbers);
     println!("{text}");
     Ok(())
 }
@@ -199,7 +199,7 @@ fn run_test(config: &Config) -> Result<()> {
     if let Err(e) = write_wav(&samples, rate, TEST_WAV) {
         warn!("failed to write {TEST_WAV}: {e}");
     }
-    let text = post_process(&transcriber.transcribe(&samples)?);
+    let text = post_process(&transcriber.transcribe(&samples)?, config.itn_numbers);
     println!("{text}");
     Ok(())
 }
@@ -817,7 +817,7 @@ fn handle_utterance(
 
     match cache.transcribe(samples) {
         Ok(raw) => {
-            let text = post_process(&raw);
+            let text = post_process(&raw, config.itn_numbers);
             if text.is_empty() {
                 debug!("empty transcription");
                 return Ok(());

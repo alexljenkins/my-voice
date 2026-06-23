@@ -179,6 +179,7 @@ audio_device = ""           # substring match against device name; "" = system d
 min_speech_ms = 300         # discard holds shorter than this (prevents accidental triggers)
 trailing_silence_ms = 150   # extra audio captured after release (catches word endings)
 injection = "auto"          # auto | wtype | xdotool | ydotool | atspi | clipboard
+itn_numbers = true          # rewrite spoken numbers as digits ("twenty five" → "25")
 ```
 
 Unknown keys are warned and ignored.
