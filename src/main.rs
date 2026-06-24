@@ -146,6 +146,10 @@ fn run(cli: Cli) -> Result<()> {
         return download::run(&config);
     }
 
+    // Every path below builds ONNX sessions; commit the shared global thread
+    // pool first (env is immutable once a session exists).
+    transcriber::init_thread_pool(&config);
+
     #[cfg(feature = "debug-tools")]
     if cli.test {
         return run_test(&config);
