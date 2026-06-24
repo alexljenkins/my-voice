@@ -121,9 +121,12 @@ fn samples_wer() {
 
     assert!(total_words > 0, "expected.txt had no usable lines");
     let aggregate = total_errors as f64 / total_words as f64;
-    println!("\n== WER harness ({model}) ==");
-    for row in &rows {
-        println!("{row}");
+    let quiet = std::env::var_os("MY_VOICE_WER_QUIET").is_some();
+    if !quiet {
+        println!("\n== WER harness ({model}) ==");
+        for row in &rows {
+            println!("{row}");
+        }
     }
     println!(
         "aggregate WER {aggregate:.3} ({total_errors}/{total_words} words), total encode {total_encode_ms}ms, total decode {total_decode_ms}ms"
