@@ -75,10 +75,27 @@ impl Config {
 
         let raw = std::fs::read_to_string(&p)
             .with_context(|| format!("reading config {}", p.display()))?;
-        let cfg: Config =
-            toml::from_str(&raw).with_context(|| format!("parsing config {}", p.display()))?;
-        cfg.warn_unknown_keys(&raw);
-        Ok(cfg)
+        Self::parse_or_default(&raw, path.is_none())
+            .with_context(|| format!("parsing config {}", p.display()))
+    }
+
+    /// Parse config text. A malformed *default-path* config degrades to defaults
+    /// (so one wrong-type value can't refuse to boot — matching the live-reload
+    /// path) WITHOUT rewriting the file, so the user keeps their typo to fix. An
+    /// explicit `--config PATH` still fails loud: the user named that exact file.
+    /// `is_default_path` is true when the path came from the default location.
+    fn parse_or_default(raw: &str, is_default_path: bool) -> Result<Self> {
+        match toml::from_str::<Config>(raw) {
+            Ok(cfg) => {
+                cfg.warn_unknown_keys(raw);
+                Ok(cfg)
+            }
+            Err(e) if is_default_path => {
+                tracing::warn!("ignoring malformed config — using defaults: {e}");
+                Ok(Self::default())
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Best-effort diff of top-level keys we didn't recognize. Cheap; logs only.
@@ -218,6 +235,20 @@ mod tests {
         let cfg: Config = toml::from_str("min_speech_ms = 500").unwrap();
         assert_eq!(cfg.min_speech_ms, 500);
         assert_eq!(cfg.model, "moonshine-streaming-small"); // default preserved
+    }
+
+    #[test]
+    fn malformed_default_config_falls_back_to_defaults() {
+        // Wrong-type value on the DEFAULT path must not brick boot — use defaults.
+        let cfg = Config::parse_or_default("min_speech_ms = \"loud\"", true).unwrap();
+        assert_eq!(cfg.min_speech_ms, Config::default().min_speech_ms);
+        assert_eq!(cfg.model, "moonshine-streaming-small");
+    }
+
+    #[test]
+    fn malformed_explicit_config_errors() {
+        // The same bad value behind an explicit --config PATH still fails loud.
+        assert!(Config::parse_or_default("min_speech_ms = \"loud\"", false).is_err());
     }
 
     #[test]

@@ -756,6 +756,7 @@ fn apply_reload(
         *typer = injector::detect(&new);
     }
     if actions.model {
+        cache.shutdown(); // stop the old evict thread so the old cache + model RAM drop now
         let c = ModelCache::new(&new);
         c.start_evict_thread();
         *cache = c;

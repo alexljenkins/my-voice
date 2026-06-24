@@ -1,7 +1,9 @@
 //! HuggingFace model fetcher — used by `--download` and the first-run auto-download.
 //!
-//! Streams each file to `{name}.part` and renames on completion so a Ctrl-C or
-//! crash mid-download never leaves a truncated file masquerading as complete.
+//! Streams each file to `{name}.part`, then stages the whole model into a
+//! `{name}.partial` sibling dir that's renamed into place only once every file
+//! verifies — so a Ctrl-C or crash mid-download never leaves a truncated file
+//! or a half-populated model dir masquerading as complete.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -72,31 +74,33 @@ pub fn run(config: &Config) -> Result<()> {
         );
     };
 
-    let dest = config.resolved_model_dir().join(&config.model);
-    fs::create_dir_all(&dest).with_context(|| format!("creating {}", dest.display()))?;
+    let final_dir = config.resolved_model_dir().join(&config.model);
+    install_atomic(config, |dest| {
+        let agent = agent();
+        for &(remote, base) in files_for(spec, config.quantized) {
+            let url_display = format!(
+                "https://huggingface.co/{}/resolve/main/{remote}",
+                spec.hf_repo
+            );
+            eprintln!("downloading {url_display}");
+            download_file(&agent, spec, remote, &dest.join(base), |done, _total| {
+                eprint!("\r  {} KiB", done / 1024);
+            })?;
+            eprintln!();
+        }
+        Ok(())
+    })?;
 
-    let agent = agent();
-    for &(remote, base) in files_for(spec, config.quantized) {
-        let url_display = format!(
-            "https://huggingface.co/{}/resolve/main/{remote}",
-            spec.hf_repo
-        );
-        eprintln!("downloading {url_display}");
-        download_file(&agent, spec, remote, &dest.join(base), |done, _total| {
-            eprint!("\r  {} KiB", done / 1024);
-        })?;
-        eprintln!();
-    }
-
-    info!("model ready at {}", dest.display());
+    info!("model ready at {}", final_dir.display());
     Ok(())
 }
 
 /// Spawn a background thread to download the configured model.
 ///
 /// Fires [`DownloadEvent`]s through `on_event`. Callers should check
-/// `config.is_model_downloaded()` first; per-file downloads are still
-/// idempotent (skip if already present) so duplicate calls are safe.
+/// `config.is_model_downloaded()` first; install is idempotent anyway
+/// (`install_atomic` returns early if the model dir exists), so duplicate
+/// calls are safe.
 pub fn start_background(config: Config, on_event: impl Fn(DownloadEvent) + Send + 'static) {
     std::thread::spawn(move || {
         match run_with_progress(&config, |pct| on_event(DownloadEvent::Progress(pct))) {
@@ -114,22 +118,46 @@ fn run_with_progress(config: &Config, on_progress: impl Fn(u8)) -> Result<()> {
         );
     };
 
-    let dest = config.resolved_model_dir().join(&config.model);
-    fs::create_dir_all(&dest).with_context(|| format!("creating {}", dest.display()))?;
+    install_atomic(config, |dest| {
+        let files = files_for(spec, config.quantized);
+        let n = files.len() as u8;
+        let agent = agent();
+        for (i, &(remote, base)) in files.iter().enumerate() {
+            let base_pct = (i as u8 * 100) / n;
+            let range = (100u8 / n).max(1);
+            download_file(&agent, spec, remote, &dest.join(base), |done, total| {
+                let within = (done * range as u64).checked_div(total).unwrap_or(0) as u8;
+                on_progress((base_pct + within).min(99));
+            })?;
+        }
+        Ok(())
+    })
+}
 
-    let files = files_for(spec, config.quantized);
-    let n = files.len() as u8;
+/// Install the configured model atomically: `download_into` fetches every file
+/// into a sibling `{model}.partial` staging dir, then a single `fs::rename`
+/// moves it into place only after they all succeed. Atomicity is per-MODEL, not
+/// per-file — the encoder (the sentinel) downloads first, so a crash mid-set
+/// would otherwise leave an encoder-present-but-decoder-missing dir that both
+/// download gates accept as complete (`is_model_downloaded` checks only the
+/// sentinel). After this the final dir only ever exists fully populated.
+fn install_atomic(config: &Config, download_into: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
+    let model_dir = config.resolved_model_dir();
+    let final_dir = model_dir.join(&config.model);
+    let staging = model_dir.join(format!("{}.partial", config.model));
 
-    let agent = agent();
-    for (i, &(remote, base)) in files.iter().enumerate() {
-        let base_pct = (i as u8 * 100) / n;
-        let range = (100u8 / n).max(1);
-        download_file(&agent, spec, remote, &dest.join(base), |done, total| {
-            let within = (done * range as u64).checked_div(total).unwrap_or(0) as u8;
-            on_progress((base_pct + within).min(99));
-        })?;
+    // Sweep any stale partial from an earlier crash — there is no cross-run resume.
+    fs::remove_dir_all(&staging).ok();
+    if final_dir.exists() {
+        return Ok(()); // already installed; the dir only ever exists complete
     }
-    Ok(())
+    fs::create_dir_all(&staging).with_context(|| format!("creating {}", staging.display()))?;
+
+    download_into(&staging)?;
+
+    // Siblings under model_dir → same filesystem → the rename is atomic.
+    fs::rename(&staging, &final_dir)
+        .with_context(|| format!("installing model to {}", final_dir.display()))
 }
 
 fn files_for(spec: &ModelSpec, quantized: bool) -> &[crate::models::FileEntry] {
@@ -157,10 +185,24 @@ fn stream_to(
         .header("content-length")
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0);
+    let mut reader = resp.into_reader();
+    stream_body(&mut reader, part, content_length, hasher, on_chunk)
+}
 
+/// Stream `reader` into `part`, hashing as it goes, then reject a short read:
+/// a connection dropped cleanly at EOF yields a truncated file with no error
+/// that would otherwise pass straight to the checksum step — or, for
+/// `tokenizer.json` (no checksum row in models.rs), install silently and fail
+/// cryptically at load. The Err routes through `with_retry` for another attempt.
+fn stream_body(
+    reader: &mut impl Read,
+    part: &Path,
+    content_length: u64,
+    hasher: &mut Sha256,
+    on_chunk: &impl Fn(u64, u64),
+) -> Result<()> {
     let mut file =
         fs::File::create(part).with_context(|| format!("creating {}", part.display()))?;
-    let mut reader = resp.into_reader();
     let mut buf = [0u8; 64 * 1024];
     let mut total: u64 = 0;
     loop {
@@ -173,15 +215,23 @@ fn stream_to(
         total += n as u64;
         on_chunk(total, content_length);
     }
+    // `<` not `!=`: a decompressing transport can legitimately yield more than
+    // content_length; only a short read signals truncation. Keep the `!= 0`
+    // escape — HF may omit the header or use chunked encoding.
+    if content_length != 0 && total < content_length {
+        let _ = fs::remove_file(part);
+        bail!("download incomplete: expected {content_length} bytes, got {total}");
+    }
     file.sync_all().ok();
     Ok(())
 }
 
 /// Download one file. Calls `on_chunk(bytes_done, content_length)` after each
-/// write. Skips if `dest` already exists. Writes to `{dest}.part` (overwritten
-/// fresh on each retry — there is no resume), verifies SHA-256 for pinned files,
-/// then renames on success. The network fetch is retried on transient failures;
-/// the checksum+rename guarantee a retry can't install bad bytes.
+/// write. Writes to `{dest}.part` (overwritten fresh on each retry — there is no
+/// resume), verifies SHA-256 for pinned files, then renames on success. The
+/// network fetch is retried on transient failures; the checksum+rename guarantee
+/// a retry can't install bad bytes. `dest` lives in a fresh staging dir
+/// (see `install_atomic`), so it never pre-exists.
 fn download_file(
     agent: &ureq::Agent,
     spec: &ModelSpec,
@@ -189,11 +239,6 @@ fn download_file(
     dest: &Path,
     on_chunk: impl Fn(u64, u64),
 ) -> Result<()> {
-    if dest.exists() {
-        info!("have {}", dest.display());
-        return Ok(());
-    }
-
     let url = format!(
         "https://huggingface.co/{}/resolve/main/{remote}",
         spec.hf_repo
@@ -289,5 +334,64 @@ mod tests {
         assert!(r.is_err());
         assert_eq!(calls.get(), MAX_ATTEMPTS as i32);
         assert_eq!(slept.get(), (MAX_ATTEMPTS - 1) as i32); // no sleep after the final try
+    }
+
+    /// A stream that ends short of content-length (clean EOF, no error) must be
+    /// rejected and its partial removed, not passed on as a complete file.
+    #[test]
+    fn stream_body_rejects_truncated_stream() {
+        let part = std::env::temp_dir().join("my-voice-test-truncated.part");
+        let _ = fs::remove_file(&part);
+        let data: &[u8] = b"only twelve!"; // 12 bytes, but we claim 100
+        let mut reader = data;
+        let mut hasher = Sha256::new();
+        let r = stream_body(&mut reader, &part, 100, &mut hasher, &|_, _| {});
+        assert!(r.is_err(), "a short read must error");
+        assert!(!part.exists(), "the truncated partial must be removed");
+    }
+
+    /// A full stream (total == content-length) succeeds and keeps its partial;
+    /// the `<` guard must not false-positive on an exact match.
+    #[test]
+    fn stream_body_accepts_complete_stream() {
+        let part = std::env::temp_dir().join("my-voice-test-complete.part");
+        let _ = fs::remove_file(&part);
+        let data: &[u8] = b"all twelve!!"; // 12 bytes == claimed length
+        let mut reader = data;
+        let mut hasher = Sha256::new();
+        let r = stream_body(
+            &mut reader,
+            &part,
+            data.len() as u64,
+            &mut hasher,
+            &|_, _| {},
+        );
+        assert!(r.is_ok(), "a complete stream must succeed");
+        assert!(part.exists(), "the completed partial must remain");
+        let _ = fs::remove_file(&part);
+    }
+
+    /// A download that fails after the first file must leave NO final model dir,
+    /// so the sentinel gate can't mistake a half-set for a complete install.
+    #[test]
+    fn install_atomic_failure_creates_no_final_dir() {
+        let root = std::env::temp_dir().join("my-voice-test-atomic-install");
+        let _ = fs::remove_dir_all(&root);
+        let config = Config {
+            model: "fake-model".into(),
+            model_dir: root.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let r = install_atomic(&config, |staging| {
+            fs::write(staging.join("encoder.onnx"), b"first file")?;
+            bail!("network died after file 1") // crash mid-set
+        });
+        assert!(r.is_err());
+        let final_dir = config.resolved_model_dir().join(&config.model);
+        assert!(
+            !final_dir.exists(),
+            "a half-downloaded model dir must not be installed"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 }
