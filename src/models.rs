@@ -120,13 +120,15 @@ pub static MODELS: &[ModelSpec] = &[
         ],
         approx_mb: 64,
     },
-    // Streaming Moonshine (split-decoder ONNX, int8-quantized only).
+    // Streaming Moonshine (merged-decoder ONNX, int8-quantized only).
     // We run full audio as a single push-to-talk pass, not chunk-by-chunk.
-    // Self-hosted on HF with _quantized suffix to match the batch model convention.
+    // Self-hosted on HF: the split decoder pair was merged into one
+    // `use_cache_branch` graph (see model card / git history), same 3-file
+    // shape as tiny/base.
     ModelSpec {
         name: "moonshine-streaming-small",
         label: "Accurate  •  moonshine-small",
-        hf_repo: "alexjenkins89/moonshine-streaming-small-onnx",
+        hf_repo: "Immortalizer/moonshine-streaming-small-onnx",
         files_quantized: STREAMING_FILES_SMALL,
         files_full: STREAMING_FILES_SMALL,
         sentinel_quantized: "encoder_model_quantized.onnx",
@@ -137,24 +139,20 @@ pub static MODELS: &[ModelSpec] = &[
                 "9bb6562667da35c8b6994bd76139528610738a33c1c3fa234024c75a6affa509",
             ),
             (
-                "decoder_model_quantized.onnx",
-                "8c1a86e1b3059950d8285a47f3dae1fb6166f0337046e115965498e7957be158",
-            ),
-            (
-                "decoder_with_past_model_quantized.onnx",
-                "e9bfbc4f2b34ea82ff5b562cc20d3eafcf87a8a25ea9bcaabd8513078dbc0565",
+                "decoder_model_merged_quantized.onnx",
+                "e821f5579df20da4c139a36f50a5e533c0a183083b95ad6ba80bc052cc17b50e",
             ),
             (
                 "tokenizer.json",
                 "7b913404bdd039af4756783218af4440bc07fb7d6d8258d677e34f95b3ec416f",
             ),
         ],
-        approx_mb: 345,
+        approx_mb: 219,
     },
     ModelSpec {
         name: "moonshine-streaming-medium",
         label: "Most accurate  •  moonshine-medium",
-        hf_repo: "alexjenkins89/moonshine-streaming-medium-onnx",
+        hf_repo: "Immortalizer/moonshine-streaming-medium-onnx",
         files_quantized: STREAMING_FILES_MEDIUM,
         files_full: STREAMING_FILES_MEDIUM,
         sentinel_quantized: "encoder_model_quantized.onnx",
@@ -165,34 +163,29 @@ pub static MODELS: &[ModelSpec] = &[
                 "4f6c491eb4018a06f2e9ecf5b6bab5c6fa4e679c9ed5dde02a0a27969649be90",
             ),
             (
-                "decoder_model_quantized.onnx",
-                "38dfe5829fcb814e33634c00baedceaa877acaac7b731203e88eb956d4419875",
-            ),
-            (
-                "decoder_with_past_model_quantized.onnx",
-                "36d7ea3cf4feb6e37fe784ba3ac7cee0bb5f4d757ab05433e2550b8eae035a7e",
+                "decoder_model_merged_quantized.onnx",
+                "f0fa62242df6c9ec36a9fc7b97faa5dc463ff3b2061cb9e8c54c65bca7ceec5b",
             ),
             (
                 "tokenizer.json",
                 "7b913404bdd039af4756783218af4440bc07fb7d6d8258d677e34f95b3ec416f",
             ),
         ],
-        approx_mb: 566,
+        approx_mb: 366,
     },
 ];
 
+// Merged-decoder layout: the split no-past/with-past pair was unified into one
+// `decoder_model_merged_quantized.onnx` (see model_scripts/). Same 3-file shape
+// as the tiny/base merged models; the loader drives it via DecoderGraph::Merged.
 const STREAMING_FILES_SMALL: &[FileEntry] = &[
     (
         "encoder_model_quantized.onnx",
         "encoder_model_quantized.onnx",
     ),
     (
-        "decoder_model_quantized.onnx",
-        "decoder_model_quantized.onnx",
-    ),
-    (
-        "decoder_with_past_model_quantized.onnx",
-        "decoder_with_past_model_quantized.onnx",
+        "decoder_model_merged_quantized.onnx",
+        "decoder_model_merged_quantized.onnx",
     ),
     ("tokenizer.json", "tokenizer.json"),
 ];
@@ -203,12 +196,8 @@ const STREAMING_FILES_MEDIUM: &[FileEntry] = &[
         "encoder_model_quantized.onnx",
     ),
     (
-        "decoder_model_quantized.onnx",
-        "decoder_model_quantized.onnx",
-    ),
-    (
-        "decoder_with_past_model_quantized.onnx",
-        "decoder_with_past_model_quantized.onnx",
+        "decoder_model_merged_quantized.onnx",
+        "decoder_model_merged_quantized.onnx",
     ),
     ("tokenizer.json", "tokenizer.json"),
 ];

@@ -40,7 +40,7 @@ pub trait Transcriber: Send {
     /// Run one throwaway pass on a short silent buffer to pay ORT's first-call
     /// graph-init cost at load instead of on the user's first transcription.
     /// Default routes through `transcribe`, exercising the same encode+decode
-    /// path (split decoders warm both graphs). Discards output and errors.
+    /// path. Discards output and errors.
     fn warm(&mut self) {
         let _ = self.transcribe(&[0.0; 1600]);
     }
