@@ -179,7 +179,11 @@ fn run_wav(config: &Config, path: &std::path::Path) -> Result<()> {
         samples.len() as f32 / 16_000.0
     );
     let mut transcriber = transcriber::create(config)?;
-    let text = post_process(&transcriber.transcribe(&samples)?, config.itn_numbers);
+    let text = post_process(
+        &transcriber.transcribe(&samples)?,
+        config.itn_numbers,
+        config.itn_ordinals,
+    );
     println!("{text}");
     Ok(())
 }
@@ -199,7 +203,11 @@ fn run_test(config: &Config) -> Result<()> {
     if let Err(e) = write_wav(&samples, rate, TEST_WAV) {
         warn!("failed to write {TEST_WAV}: {e}");
     }
-    let text = post_process(&transcriber.transcribe(&samples)?, config.itn_numbers);
+    let text = post_process(
+        &transcriber.transcribe(&samples)?,
+        config.itn_numbers,
+        config.itn_ordinals,
+    );
     println!("{text}");
     Ok(())
 }
@@ -649,7 +657,9 @@ fn apply_reload(
             "moonshine-streaming-small" => {
                 "Switched to moonshine-streaming-small. Best accuracy for most use cases."
             }
-            "moonshine-streaming-medium" => "Switched to moonshine-streaming-medium. Highest accuracy.",
+            "moonshine-streaming-medium" => {
+                "Switched to moonshine-streaming-medium. Highest accuracy."
+            }
             _ => "Model switched.",
         };
         notify::send("Model ready", label);
@@ -817,7 +827,7 @@ fn handle_utterance(
 
     match cache.transcribe(samples) {
         Ok(raw) => {
-            let text = post_process(&raw, config.itn_numbers);
+            let text = post_process(&raw, config.itn_numbers, config.itn_ordinals);
             if text.is_empty() {
                 debug!("empty transcription");
                 return Ok(());

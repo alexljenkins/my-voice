@@ -24,6 +24,7 @@ pub struct Config {
     pub trailing_silence_ms: u64,
     pub injection: String,
     pub itn_numbers: bool,
+    pub itn_ordinals: bool,
 }
 
 impl Default for Config {
@@ -42,6 +43,7 @@ impl Default for Config {
             trailing_silence_ms: 150,
             injection: "auto".into(),
             itn_numbers: true,
+            itn_ordinals: false,
         }
     }
 }
@@ -95,6 +97,7 @@ impl Config {
             "trailing_silence_ms",
             "injection",
             "itn_numbers",
+            "itn_ordinals",
         ];
         if let Ok(value) = toml::from_str::<toml::Table>(raw) {
             for key in value.keys() {
@@ -199,6 +202,7 @@ mod tests {
         assert_eq!(back.trailing_silence_ms, 150);
         assert!(back.quantized);
         assert!(back.itn_numbers);
+        assert!(!back.itn_ordinals);
     }
 
     #[test]
