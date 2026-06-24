@@ -74,10 +74,25 @@ impl AudioRecorder {
             }
         };
 
+        // Every cpal sample format `append_mono` can convert to f32 — a USB/pro
+        // interface that only offers i32/i8 must not hard-error. `FromSample`
+        // handles the per-format scaling (and 8/16/32/64-bit unsigned origins).
         let stream = match self.sample_format {
             SampleFormat::F32 => self.device.build_input_stream(
                 &config,
                 move |data: &[f32], _| append_mono(&buf, data, channels, cap),
+                err_fn,
+                None,
+            ),
+            SampleFormat::F64 => self.device.build_input_stream(
+                &config,
+                move |data: &[f64], _| append_mono(&buf, data, channels, cap),
+                err_fn,
+                None,
+            ),
+            SampleFormat::I8 => self.device.build_input_stream(
+                &config,
+                move |data: &[i8], _| append_mono(&buf, data, channels, cap),
                 err_fn,
                 None,
             ),
@@ -87,15 +102,39 @@ impl AudioRecorder {
                 err_fn,
                 None,
             ),
-            SampleFormat::U16 => self.device.build_input_stream(
+            SampleFormat::I32 => self.device.build_input_stream(
                 &config,
-                move |data: &[u16], _| append_mono(&buf, data, channels, cap),
+                move |data: &[i32], _| append_mono(&buf, data, channels, cap),
+                err_fn,
+                None,
+            ),
+            SampleFormat::I64 => self.device.build_input_stream(
+                &config,
+                move |data: &[i64], _| append_mono(&buf, data, channels, cap),
                 err_fn,
                 None,
             ),
             SampleFormat::U8 => self.device.build_input_stream(
                 &config,
                 move |data: &[u8], _| append_mono(&buf, data, channels, cap),
+                err_fn,
+                None,
+            ),
+            SampleFormat::U16 => self.device.build_input_stream(
+                &config,
+                move |data: &[u16], _| append_mono(&buf, data, channels, cap),
+                err_fn,
+                None,
+            ),
+            SampleFormat::U32 => self.device.build_input_stream(
+                &config,
+                move |data: &[u32], _| append_mono(&buf, data, channels, cap),
+                err_fn,
+                None,
+            ),
+            SampleFormat::U64 => self.device.build_input_stream(
+                &config,
+                move |data: &[u64], _| append_mono(&buf, data, channels, cap),
                 err_fn,
                 None,
             ),
@@ -146,14 +185,20 @@ impl AudioRecorder {
 }
 
 /// §8b: prefer 16 kHz native capture; falls back to the device default if unsupported.
-/// Eliminates the resample step entirely on compatible hardware.
+/// Eliminates the resample step entirely on compatible hardware. A device may
+/// expose several 16 kHz-capable configs in different sample formats; pick the
+/// one we consume most cleanly (`format_rank`) rather than whatever it lists first.
 fn select_stream_config(device: &cpal::Device) -> Result<(SampleFormat, usize, u32)> {
-    if let Ok(mut configs) = device.supported_input_configs() {
+    if let Ok(configs) = device.supported_input_configs() {
         if let Some(cfg) = configs
-            .find(|c| c.min_sample_rate().0 <= TARGET_RATE && c.max_sample_rate().0 >= TARGET_RATE)
+            .filter(|c| {
+                c.min_sample_rate().0 <= TARGET_RATE && c.max_sample_rate().0 >= TARGET_RATE
+            })
+            .min_by_key(|c| format_rank(c.sample_format()))
         {
-            debug!("device supports 16 kHz natively — resample step skipped");
-            return Ok((cfg.sample_format(), cfg.channels() as usize, TARGET_RATE));
+            let fmt = cfg.sample_format();
+            debug!("device supports 16 kHz natively ({fmt:?}) — resample step skipped");
+            return Ok((fmt, cfg.channels() as usize, TARGET_RATE));
         }
     }
     let default = device
@@ -164,6 +209,26 @@ fn select_stream_config(device: &cpal::Device) -> Result<(SampleFormat, usize, u
         default.channels() as usize,
         default.sample_rate().0,
     ))
+}
+
+/// Rank input sample formats by how cleanly we consume them, lower = preferred.
+/// Float needs no scaling; 16-bit is the universal mic format; wider ints work
+/// but cost a conversion; 8-bit carries the most quantization noise. Every
+/// variant is handled by `start`, so this only chooses *which* config to open.
+fn format_rank(f: SampleFormat) -> u8 {
+    match f {
+        SampleFormat::F32 => 0,
+        SampleFormat::I16 => 1,
+        SampleFormat::I32 => 2,
+        SampleFormat::F64 => 3,
+        SampleFormat::U16 => 4,
+        SampleFormat::I64 => 5,
+        SampleFormat::U32 => 6,
+        SampleFormat::U64 => 7,
+        SampleFormat::I8 => 8,
+        SampleFormat::U8 => 9,
+        _ => 10,
+    }
 }
 
 fn select_device(host: &cpal::Host, wanted: &str) -> Result<cpal::Device> {
@@ -531,8 +596,10 @@ fn card_friendly_names() -> std::collections::HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_mono, apply_audio_processing, card_id, high_level_label, lock_buf, resample,
+        append_mono, apply_audio_processing, card_id, format_rank, high_level_label, lock_buf,
+        resample,
     };
+    use cpal::SampleFormat;
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::sync::{Arc, Mutex};
 
@@ -571,6 +638,15 @@ mod tests {
         assert_eq!(card_id("hw:CARD=Snowball,DEV=0"), Some("Snowball"));
         assert_eq!(card_id("sysdefault:CARD=PCH"), Some("PCH"));
         assert_eq!(card_id("pipewire"), None);
+    }
+
+    #[test]
+    fn format_rank_prefers_cleanest() {
+        // Float first, then 16-bit, then wider ints; 8-bit last.
+        assert!(format_rank(SampleFormat::F32) < format_rank(SampleFormat::I16));
+        assert!(format_rank(SampleFormat::I16) < format_rank(SampleFormat::I32));
+        assert!(format_rank(SampleFormat::I32) < format_rank(SampleFormat::U8));
+        assert!(format_rank(SampleFormat::I8) < format_rank(SampleFormat::U8));
     }
 
     #[test]

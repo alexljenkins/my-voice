@@ -50,6 +50,9 @@ pub struct Moonshine {
     /// Present only on streaming encoders — fed all-ones (full audio, no pad).
     encoder_mask_input: Option<String>,
     decoder: DecoderGraph,
+    /// Token ids masked out at argmax — `<unk>` and the `<<ST_n>>` streaming
+    /// markers. Computed once from the tokenizer at load.
+    suppressed_tokens: Vec<i64>,
 }
 
 /// The merged decoder graph, switched by `use_cache_branch`.
@@ -127,6 +130,8 @@ impl Moonshine {
             session,
         };
 
+        let suppressed_tokens = suppressed_token_ids(&tokenizer);
+
         Ok(Self {
             encoder,
             tokenizer,
@@ -134,6 +139,7 @@ impl Moonshine {
             encoder_output_name,
             encoder_mask_input,
             decoder,
+            suppressed_tokens,
         })
     }
 
@@ -182,6 +188,7 @@ impl Transcriber for Moonshine {
         let encode_ms = t_enc.elapsed().as_millis();
 
         let t_dec = Instant::now();
+        let suppressed = &self.suppressed_tokens;
         let DecoderGraph {
             session,
             decoder_kv_input_names,
@@ -201,6 +208,7 @@ impl Transcriber for Moonshine {
             encoder_kv_output_names,
             *num_heads,
             *head_dim,
+            suppressed,
         )?;
         let decode_ms = t_dec.elapsed().as_millis();
 
@@ -235,7 +243,18 @@ fn decode_merged(
     encoder_kv_output_names: &[String],
     num_heads: usize,
     head_dim: usize,
+    suppressed: &[i64],
 ) -> Result<Vec<i64>> {
+    // A token id's logit lives at the same column index, so a direct-indexed
+    // bool mask gives O(1) lookup in the argmax hot loop (no per-step hashing).
+    let mask_len = suppressed.iter().copied().max().map_or(0, |m| m + 1).max(0) as usize;
+    let mut suppress_mask = vec![false; mask_len];
+    for &id in suppressed {
+        if id >= 0 {
+            suppress_mask[id as usize] = true;
+        }
+    }
+
     let dummy = Tensor::<f32>::from_array((
         [1usize, num_heads, 1usize, head_dim],
         vec![0.0f32; num_heads * head_dim],
@@ -296,7 +315,7 @@ fn decode_merged(
 
         let (lshape, logits) = outputs["logits"].try_extract_tensor::<f32>().ort()?;
         let vocab = *lshape.last().context("logits has no dims")? as usize;
-        let next = argmax(&logits[logits.len() - vocab..]);
+        let next = argmax_masked(&logits[logits.len() - vocab..], &suppress_mask);
         if next == EOS_TOKEN_ID {
             hit_eos = true;
             break;
@@ -451,16 +470,32 @@ fn detect_kv_dims(decoder: &Session) -> (usize, usize) {
         })
 }
 
-fn argmax(v: &[f32]) -> i64 {
+/// argmax over a logits row, skipping suppressed token ids (column index ==
+/// token id). When the model would pick `<unk>` or a `<<ST_n>>` marker, the
+/// next-best real token wins instead — keeping junk out of both the output and
+/// the decoder's own context (the tokenizer only strips it from the output).
+fn argmax_masked(v: &[f32], suppress: &[bool]) -> i64 {
     let mut best = 0usize;
     let mut best_val = f32::MIN;
     for (i, &x) in v.iter().enumerate() {
-        if x > best_val {
+        if x > best_val && !suppress.get(i).copied().unwrap_or(false) {
             best_val = x;
             best = i;
         }
     }
     best as i64
+}
+
+/// Token ids the decoder must never select: `<unk>` (would emit nothing useful
+/// yet poison context) and the streaming `<<ST_n>>` segment markers (unused in
+/// our single push-to-talk pass). EOS / BOS are intentionally left selectable.
+fn suppressed_token_ids(tokenizer: &Tokenizer) -> Vec<i64> {
+    tokenizer
+        .get_vocab(true)
+        .into_iter()
+        .filter(|(tok, _)| tok == "<unk>" || (tok.starts_with("<<ST_") && tok.ends_with(">>")))
+        .map(|(_, id)| id as i64)
+        .collect()
 }
 
 #[cfg(test)]
@@ -534,6 +569,18 @@ mod tests {
         // Too short to ever loop.
         let mut short = vec![1, 2, 3];
         assert!(!truncate_loop(&mut short));
+    }
+
+    #[test]
+    fn argmax_skips_suppressed() {
+        let logits = [0.1f32, 5.0, 0.2, 3.0];
+        // No mask: plain argmax picks the 5.0 at index 1.
+        assert_eq!(argmax_masked(&logits, &[]), 1);
+        // Suppress index 1: the next-best (3.0 at index 3) wins.
+        let mask = [false, true, false, false];
+        assert_eq!(argmax_masked(&logits, &mask), 3);
+        // A mask shorter than the row leaves the uncovered tail selectable.
+        assert_eq!(argmax_masked(&logits, &[false, true]), 3);
     }
 
     #[test]

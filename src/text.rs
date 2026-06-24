@@ -1,22 +1,51 @@
 //! Post-processing applied to every transcription, all backends.
 //!
 //! Curly quotes literally break wtype, and a stray newline presses Enter in the
-//! target app — in a terminal that *executes* the line. Both get neutralized.
+//! target app — in a terminal that *executes* the line. Invisible characters
+//! (BOM, zero-width, bidi controls) are worse: they corrupt the injected string
+//! without ever showing on screen. All get neutralized.
 
-/// Trim, normalize curly quotes to ASCII, collapse newlines to spaces, then
-/// apply the user's custom-vocab corrections (proper nouns, jargon, project
-/// names the general-English model never learns).
+/// Drop invisible junk, normalize curly quotes to ASCII, collapse newlines to
+/// spaces, trim, then apply the user's custom-vocab corrections (proper nouns,
+/// jargon, project names the general-English model never learns).
 pub fn post_process(s: &str, corrections: &[(String, String)]) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
-        out.push(match c {
-            '\u{2018}' | '\u{2019}' | '\u{201B}' | '\u{2032}' => '\'',
-            '\u{201C}' | '\u{201D}' | '\u{201F}' | '\u{2033}' => '"',
-            '\n' | '\r' => ' ',
-            other => other,
-        });
+        match c {
+            // Invisible junk — zero-width, BOM, bidi controls, soft hyphen, tag
+            // chars. They carry no meaning in dictated text and corrupt the
+            // injected string: a BOM mid-line, a hidden bidi override flipping
+            // word order, tag chars smuggling ASCII. Dropped, not rewritten.
+            _ if is_invisible(c) => {}
+            '\u{2018}' | '\u{2019}' | '\u{201B}' | '\u{2032}' => out.push('\''),
+            '\u{201C}' | '\u{201D}' | '\u{201F}' | '\u{2033}' => out.push('"'),
+            '\n' | '\r' => out.push(' '),
+            other => out.push(other),
+        }
     }
     apply_corrections(out.trim(), corrections)
+}
+
+/// Zero-width, byte-order-mark, bidirectional-control, soft-hyphen and tag
+/// characters: rendered as nothing, yet able to break injection or hide intent.
+/// Visible content (accents, combining marks, CJK, emoji) is deliberately *not*
+/// matched — this strips junk, it does not edit the model's words. In
+/// particular ZWNJ/ZWJ (U+200C/U+200D) are kept: they bind emoji sequences and
+/// are orthographically required in some scripts, so they carry meaning.
+fn is_invisible(c: char) -> bool {
+    matches!(c,
+        '\u{00AD}'                  // soft hyphen
+        | '\u{061C}'                // arabic letter mark
+        | '\u{180E}'                // mongolian vowel separator
+        | '\u{200B}'                // zero-width space
+        | '\u{200E}'..='\u{200F}'   // LRM, RLM (bidi marks) — note: 200C/200D skipped
+        | '\u{202A}'..='\u{202E}'   // bidi embeddings & overrides
+        | '\u{2060}'..='\u{2064}'   // word joiner, invisible operators
+        | '\u{2066}'..='\u{206F}'   // bidi isolates + deprecated format chars
+        | '\u{FEFF}'                // BOM / zero-width no-break space
+        | '\u{FFF9}'..='\u{FFFB}'   // interlinear annotation anchors
+        | '\u{E0000}'..='\u{E007F}' // tag characters (hidden-ASCII smuggling)
+    )
 }
 
 /// Whole-word, case-insensitive find-and-replace. Patterns are matched
@@ -102,6 +131,33 @@ mod tests {
     fn collapses_newlines() {
         assert_eq!(pp("a\nb"), "a b");
         assert_eq!(pp("ls\n"), "ls");
+    }
+
+    #[test]
+    fn strips_invisible_and_bom() {
+        assert_eq!(pp("\u{FEFF}hello"), "hello"); // BOM
+        assert_eq!(pp("hel\u{200B}lo"), "hello"); // zero-width space
+        assert_eq!(pp("soft\u{00AD}hyphen"), "softhyphen");
+        assert_eq!(pp("a\u{202E}b"), "ab"); // right-to-left override
+        assert_eq!(pp("x\u{2060}y"), "xy"); // word joiner
+        assert_eq!(pp("l\u{200E}r"), "lr"); // left-to-right mark
+        assert_eq!(pp("tag\u{E0041}end"), "tagend"); // tag character
+        // A BOM that would otherwise survive the trim and corrupt injection.
+        assert_eq!(pp("  \u{FEFF}ls "), "ls");
+    }
+
+    #[test]
+    fn preserves_visible_unicode() {
+        // Accents, combining marks, CJK and emoji are real content — kept as-is.
+        assert_eq!(pp("café"), "café");
+        assert_eq!(pp("e\u{0301}"), "e\u{0301}"); // combining acute is visible
+        assert_eq!(pp("日本語"), "日本語");
+        assert_eq!(pp("emoji 😀 ok"), "emoji 😀 ok");
+        // ZWJ binds an emoji sequence into one glyph; ZWNJ is orthographic. Both
+        // carry meaning, so they survive — they are not "invisible junk".
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        assert_eq!(pp(family), family);
+        assert_eq!(pp("\u{200C}"), "\u{200C}"); // ZWNJ kept
     }
 
     #[test]
