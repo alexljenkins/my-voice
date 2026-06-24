@@ -6,6 +6,7 @@
 //! lock. Load is deferred to first use so the daemon starts instantly and idle
 //! sessions hold no model in RAM.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -27,6 +28,10 @@ pub struct ModelCache {
     factory: Box<Factory>,
     /// `-1` never evict, `0` reload every use, `>0` evict after N idle seconds.
     timeout_secs: i64,
+    /// Set by `shutdown` to stop the evict thread. Without it the thread's own
+    /// `Arc` clone keeps a replaced ModelCache (and its model's RAM) alive after
+    /// a model switch until the zombie's own idle-eviction eventually fired.
+    shutdown: Arc<AtomicBool>,
 }
 
 impl ModelCache {
@@ -44,7 +49,16 @@ impl ModelCache {
             last_used: Mutex::new(Instant::now()),
             factory,
             timeout_secs,
+            shutdown: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// Signal the evict thread to exit. Called on the OLD cache during a model
+    /// switch: once the thread breaks it drops its `Arc` clone, letting the old
+    /// ModelCache — and the model's RAM — drop now instead of lingering until the
+    /// zombie thread's own idle-eviction eventually fired.
+    pub fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Relaxed);
     }
 
     /// Lock the slot, recovering from poison. A panic inside `transcribe` (on a
@@ -107,12 +121,26 @@ impl ModelCache {
     /// Spawn the background evictor. No-op for `timeout_secs <= 0`: negative
     /// never evicts, and `0` keeps nothing resident to evict.
     pub fn start_evict_thread(self: &Arc<Self>) {
+        self.spawn_evictor(EVICT_TICK);
+    }
+
+    /// Inner spawn with an injectable tick so tests can drive shutdown without a
+    /// 30s wait. Returns the handle (the public caller lets it detach).
+    fn spawn_evictor(self: &Arc<Self>, tick: Duration) -> Option<thread::JoinHandle<()>> {
         if self.timeout_secs <= 0 {
-            return;
+            return None;
         }
         let me = Arc::clone(self);
-        thread::spawn(move || loop {
-            thread::sleep(EVICT_TICK);
+        Some(thread::spawn(move || loop {
+            // Check at the top (prompt on shutdown) and again after the sleep
+            // (catches a flag set during the tick) so a replaced cache exits fast.
+            if me.shutdown.load(Ordering::Relaxed) {
+                break;
+            }
+            thread::sleep(tick);
+            if me.shutdown.load(Ordering::Relaxed) {
+                break;
+            }
             let mut slot = me.lock_slot();
             if slot.is_none() {
                 continue;
@@ -124,7 +152,7 @@ impl ModelCache {
                 *slot = None;
                 info!("model unloaded after {}s idle", idle.as_secs());
             }
-        });
+        }))
     }
 }
 
@@ -261,5 +289,24 @@ mod tests {
         cache
             .ensure_loaded()
             .expect("ensure_loaded should recover from poison");
+    }
+
+    /// The evict thread must exit once `shutdown()` is signalled, so a model
+    /// switch can drop the old cache (and its model) instead of leaking a zombie
+    /// 30s-ticking thread. A short tick keeps the test fast; `join()` blocks
+    /// until the thread observes the flag and breaks — it'd hang if it didn't.
+    #[test]
+    fn evict_thread_exits_on_shutdown() {
+        let cache = ModelCache::with_factory(
+            60, // positive timeout so the evictor actually spawns
+            Box::new(|| Ok(Box::new(OkTranscriber) as Box<dyn Transcriber>)),
+        );
+        let handle = cache
+            .spawn_evictor(Duration::from_millis(5))
+            .expect("evictor must spawn for a positive timeout");
+        cache.shutdown();
+        handle
+            .join()
+            .expect("evict thread must exit after shutdown()");
     }
 }
