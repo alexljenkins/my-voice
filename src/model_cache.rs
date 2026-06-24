@@ -128,12 +128,16 @@ impl ModelCache {
     }
 }
 
-/// Build the transcriber into `slot` if empty. Caller holds the slot lock.
+/// Build the transcriber into `slot` if empty, then warm it (one throwaway pass
+/// pays ORT's first-call graph-init cost here, not on the user's first real
+/// transcription). Caller holds the slot lock.
 fn load_locked(slot: &mut Option<Box<dyn Transcriber>>, factory: &Factory) -> Result<()> {
     if slot.is_none() {
         let t0 = Instant::now();
-        *slot = Some(factory()?);
-        info!("model loaded in {} ms", t0.elapsed().as_millis());
+        let mut t = factory()?;
+        t.warm();
+        *slot = Some(t);
+        info!("model loaded + warmed in {} ms", t0.elapsed().as_millis());
     }
     Ok(())
 }
@@ -150,6 +154,9 @@ mod tests {
         fn transcribe(&mut self, _audio: &[f32]) -> Result<String> {
             panic!("transcriber blew up");
         }
+        // The load-time warm must not panic; this fixture only blows up on a
+        // real transcribe (the poison path under test).
+        fn warm(&mut self) {}
     }
 
     struct OkTranscriber;
@@ -186,6 +193,61 @@ mod tests {
             2,
             "model should be rebuilt after poison"
         );
+    }
+
+    /// Loading the model warms it exactly once: `ensure_loaded` (and the inline
+    /// load in `transcribe`) must run one throwaway pass so ORT's first-call cost
+    /// is paid at load, and a second `ensure_loaded` on the resident model must
+    /// not warm again.
+    #[test]
+    fn load_warms_once() {
+        struct CountingTranscriber {
+            warms: Arc<AtomicUsize>,
+        }
+        impl Transcriber for CountingTranscriber {
+            fn transcribe(&mut self, _audio: &[f32]) -> Result<String> {
+                Ok(String::new())
+            }
+            fn warm(&mut self) {
+                self.warms.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let warms = Arc::new(AtomicUsize::new(0));
+        let w = Arc::clone(&warms);
+        let cache = ModelCache::with_factory(
+            -1,
+            Box::new(move || {
+                Ok(Box::new(CountingTranscriber {
+                    warms: Arc::clone(&w),
+                }) as Box<dyn Transcriber>)
+            }),
+        );
+
+        cache.ensure_loaded().unwrap();
+        cache.ensure_loaded().unwrap();
+        assert_eq!(warms.load(Ordering::SeqCst), 1, "warm runs once per load");
+    }
+
+    /// The default `warm()` routes through `transcribe` (so split decoders warm
+    /// both graphs). Verify the trait default actually calls `transcribe`.
+    #[test]
+    fn default_warm_calls_transcribe() {
+        struct DefaultWarm {
+            calls: Arc<AtomicUsize>,
+        }
+        impl Transcriber for DefaultWarm {
+            fn transcribe(&mut self, _audio: &[f32]) -> Result<String> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(String::new())
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut t = DefaultWarm {
+            calls: Arc::clone(&calls),
+        };
+        t.warm();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     /// ensure_loaded must also survive a poisoned slot (keydown preload path).
