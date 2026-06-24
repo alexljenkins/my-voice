@@ -1,17 +1,14 @@
 //! Moonshine ONNX backend: encoder + autoregressive greedy decode over the raw
 //! 16 kHz waveform (no mel spectrogram, no 30s padding).
 //!
-//! Two decoder graph shapes are supported, detected from the files on disk:
+//! The decoder is a single merged graph (`decoder_model_merged.onnx`) switched
+//! by a `use_cache_branch` flag; KV names are `past_key_values.*` / `present.*`.
+//! Faithful port of voxtype's backend.
 //!
-//! * **Merged** (`moonshine-tiny`/`-base`): one `decoder_model_merged.onnx`
-//!   switched by a `use_cache_branch` flag. KV names are `past_key_values.*` /
-//!   `present.*`. Faithful port of voxtype's backend.
-//! * **Split** (streaming `-small`/`-medium`): a no-past `decoder_model_quantized.onnx`
-//!   for step 0 and a `decoder_with_past_model_quantized.onnx` for later steps. Self-attn
-//!   KV (`past_self_*` / `present_self_*`) grows each step; cross-attn KV is
-//!   computed once at step 0 and fed back as `present_cross_*_orig`. The
-//!   streaming encoder also takes an `attention_mask` input. We run it as a
-//!   single push-to-talk pass over the whole utterance, not chunk-by-chunk.
+//! Streaming models (`-small`/`-medium`) ship that same merged shape, but their
+//! encoder reshapes the waveform into 80-sample (5 ms) frames and takes an
+//! all-ones `attention_mask` input. We run a single push-to-talk pass over the
+//! whole utterance, not chunk-by-chunk.
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -55,25 +52,17 @@ pub struct Moonshine {
     decoder: DecoderGraph,
 }
 
-enum DecoderGraph {
-    /// One merged graph switched by `use_cache_branch`.
-    Merged {
-        session: Session,
-        /// `past_key_values.*` names partitioned + sorted; pairing with the
-        /// matching `present.*` outputs is positional after sorting.
-        decoder_kv_input_names: Vec<String>,
-        encoder_kv_input_names: Vec<String>,
-        decoder_kv_output_names: Vec<String>,
-        encoder_kv_output_names: Vec<String>,
-        num_heads: usize,
-        head_dim: usize,
-    },
-    /// Separate no-past (step 0) and with-past (later) graphs.
-    Split {
-        initial: Session,
-        with_past: Session,
-        n_layers: usize,
-    },
+/// The merged decoder graph, switched by `use_cache_branch`.
+struct DecoderGraph {
+    session: Session,
+    /// `past_key_values.*` names partitioned + sorted; pairing with the
+    /// matching `present.*` outputs is positional after sorting.
+    decoder_kv_input_names: Vec<String>,
+    encoder_kv_input_names: Vec<String>,
+    decoder_kv_output_names: Vec<String>,
+    encoder_kv_output_names: Vec<String>,
+    num_heads: usize,
+    head_dim: usize,
 }
 
 impl Moonshine {
@@ -111,57 +100,31 @@ impl Moonshine {
             .find(|n| *n == "attention_mask")
             .map(str::to_string);
 
-        // --- Decoder: split if a with-past graph is present, else merged.
-        let decoder = if let Some(with_past_path) =
-            pick(dir, &["decoder_with_past_model_quantized.onnx"])
-        {
-            let initial_path = pick(dir, &["decoder_model_quantized.onnx"]).ok_or_else(|| {
-                anyhow!("split decoder missing no-past graph in {}", dir.display())
-            })?;
-            let initial = build_session(&initial_path, threads)?;
-            let with_past = build_session(&with_past_path, threads)?;
-            let n_layers = initial
-                .outputs()
-                .iter()
-                .filter(|o| o.name().starts_with("present_self_key_"))
-                .count();
-            if n_layers == 0 {
-                bail!("split decoder exposes no present_self_key_* outputs");
-            }
-            info!("loading moonshine streaming ({n_layers} layers, {threads} threads)");
-            DecoderGraph::Split {
-                initial,
-                with_past,
-                n_layers,
-            }
-        } else {
-            let dec_path = pick(dir, decoder_merged_candidates(config.quantized))
-                .ok_or_else(|| anyhow!("no decoder .onnx found in {}", dir.display()))?;
-            let session = build_session(&dec_path, threads)?;
-            let (num_heads, head_dim) = detect_kv_dims(&session);
+        // --- Decoder (merged `use_cache_branch` graph).
+        let dec_path = pick(dir, decoder_merged_candidates(config.quantized))
+            .ok_or_else(|| anyhow!("no decoder .onnx found in {}", dir.display()))?;
+        let session = build_session(&dec_path, threads)?;
+        let (num_heads, head_dim) = detect_kv_dims(&session);
 
-            let collect =
-                |sess: &Session, get: fn(&Session) -> Vec<String>, prefix: &str, side: &str| {
-                    let mut v: Vec<String> = get(sess)
-                        .into_iter()
-                        .filter(|n| n.starts_with(prefix) && n.contains(side))
-                        .collect();
-                    v.sort();
-                    v
-                };
-            let in_names = |s: &Session| s.inputs().iter().map(|i| i.name().to_string()).collect();
-            let out_names =
-                |s: &Session| s.outputs().iter().map(|o| o.name().to_string()).collect();
-            info!("loading moonshine ({threads} threads)");
-            DecoderGraph::Merged {
-                decoder_kv_input_names: collect(&session, in_names, "past_key_values", ".decoder."),
-                encoder_kv_input_names: collect(&session, in_names, "past_key_values", ".encoder."),
-                decoder_kv_output_names: collect(&session, out_names, "present", ".decoder."),
-                encoder_kv_output_names: collect(&session, out_names, "present", ".encoder."),
-                num_heads,
-                head_dim,
-                session,
-            }
+        let collect = |sess: &Session, get: fn(&Session) -> Vec<String>, prefix: &str, side: &str| {
+            let mut v: Vec<String> = get(sess)
+                .into_iter()
+                .filter(|n| n.starts_with(prefix) && n.contains(side))
+                .collect();
+            v.sort();
+            v
+        };
+        let in_names = |s: &Session| s.inputs().iter().map(|i| i.name().to_string()).collect();
+        let out_names = |s: &Session| s.outputs().iter().map(|o| o.name().to_string()).collect();
+        info!("loading moonshine ({threads} threads)");
+        let decoder = DecoderGraph {
+            decoder_kv_input_names: collect(&session, in_names, "past_key_values", ".decoder."),
+            encoder_kv_input_names: collect(&session, in_names, "past_key_values", ".encoder."),
+            decoder_kv_output_names: collect(&session, out_names, "present", ".decoder."),
+            encoder_kv_output_names: collect(&session, out_names, "present", ".encoder."),
+            num_heads,
+            head_dim,
+            session,
         };
 
         Ok(Self {
@@ -219,32 +182,26 @@ impl Transcriber for Moonshine {
         let encode_ms = t_enc.elapsed().as_millis();
 
         let t_dec = Instant::now();
-        let tokens = match &mut self.decoder {
-            DecoderGraph::Merged {
-                session,
-                decoder_kv_input_names,
-                encoder_kv_input_names,
-                decoder_kv_output_names,
-                encoder_kv_output_names,
-                num_heads,
-                head_dim,
-            } => decode_merged(
-                session,
-                &enc,
-                max_tokens,
-                decoder_kv_input_names,
-                encoder_kv_input_names,
-                decoder_kv_output_names,
-                encoder_kv_output_names,
-                *num_heads,
-                *head_dim,
-            )?,
-            DecoderGraph::Split {
-                initial,
-                with_past,
-                n_layers,
-            } => decode_split(initial, with_past, *n_layers, &enc, max_tokens)?,
-        };
+        let DecoderGraph {
+            session,
+            decoder_kv_input_names,
+            encoder_kv_input_names,
+            decoder_kv_output_names,
+            encoder_kv_output_names,
+            num_heads,
+            head_dim,
+        } = &mut self.decoder;
+        let tokens = decode_merged(
+            session,
+            &enc,
+            max_tokens,
+            decoder_kv_input_names,
+            encoder_kv_input_names,
+            decoder_kv_output_names,
+            encoder_kv_output_names,
+            *num_heads,
+            *head_dim,
+        )?;
         let decode_ms = t_dec.elapsed().as_millis();
 
         let ids: Vec<u32> = tokens[1..].iter().map(|&t| t as u32).collect();
@@ -361,96 +318,6 @@ fn decode_merged(
                 .map(|n| take_output(&mut outputs, n))
                 .collect::<Result<_>>()?;
         }
-    }
-    if !hit_eos && collapse_runaway(&mut tokens) {
-        debug!("runaway decode collapsed to {} tokens", tokens.len() - 1);
-    }
-    Ok(tokens)
-}
-
-/// Greedy decode over the split (no-past + with-past) streaming decoder.
-///
-/// Self-attn KV is moved between steps as owned ort values; the static
-/// cross-attn KV and encoder hidden states are fed as views.
-fn decode_split(
-    initial: &mut Session,
-    with_past: &mut Session,
-    n_layers: usize,
-    enc: &DynValue,
-    max_tokens: usize,
-) -> Result<Vec<i64>> {
-    let mut tokens = vec![DECODER_START_TOKEN_ID];
-    let mut hit_eos = false;
-    // Self-attn KV, length 2*n_layers as key0,val0,key1,val1,…; grows each step.
-    let mut past_self: Vec<DynValue> = Vec::new();
-    // Cross-attn KV: static, captured at step 0, fed back every later step.
-    let mut cross_kv: Vec<DynValue> = Vec::new();
-
-    for step in 0..max_tokens {
-        let last = *tokens.last().unwrap();
-        let mut inputs: Vec<(Cow<str>, SessionInputValue)> = vec![
-            (
-                Cow::Borrowed("decoder_input_ids"),
-                Tensor::<i64>::from_array(([1usize, 1usize], vec![last]))
-                    .ort()?
-                    .into(),
-            ),
-            (Cow::Borrowed("encoder_hidden_states"), enc.into()),
-        ];
-
-        let mut outputs = if step == 0 {
-            initial.run(inputs).ort()?
-        } else {
-            for (i, v) in std::mem::take(&mut past_self).into_iter().enumerate() {
-                let kind = if i % 2 == 0 { "key" } else { "value" };
-                inputs.push((Cow::Owned(format!("past_self_{kind}_{}", i / 2)), v.into()));
-            }
-            for (i, v) in cross_kv.iter().enumerate() {
-                let kind = if i % 2 == 0 { "key" } else { "value" };
-                inputs.push((
-                    Cow::Owned(format!("present_cross_{kind}_{}_orig", i / 2)),
-                    v.into(),
-                ));
-            }
-            with_past.run(inputs).ort()?
-        };
-
-        let (lshape, logits) = outputs["logits"].try_extract_tensor::<f32>().ort()?;
-        let vocab = *lshape.last().context("logits has no dims")? as usize;
-        let next = argmax(&logits[logits.len() - vocab..]);
-        if next == EOS_TOKEN_ID {
-            hit_eos = true;
-            break;
-        }
-        tokens.push(next);
-        if truncate_loop(&mut tokens) {
-            debug!("repetition loop detected at step {step}; truncating");
-            break;
-        }
-
-        // Take self-attn KV for the next step out of the outputs (owned, no copy).
-        let mut next_self = Vec::with_capacity(2 * n_layers);
-        for i in 0..n_layers {
-            next_self.push(take_output(&mut outputs, &format!("present_self_key_{i}"))?);
-            next_self.push(take_output(
-                &mut outputs,
-                &format!("present_self_value_{i}"),
-            )?);
-        }
-        // Cross-attn KV depends only on the encoder output: capture once.
-        if step == 0 {
-            for i in 0..n_layers {
-                cross_kv.push(take_output(
-                    &mut outputs,
-                    &format!("present_cross_key_{i}"),
-                )?);
-                cross_kv.push(take_output(
-                    &mut outputs,
-                    &format!("present_cross_value_{i}"),
-                )?);
-            }
-        }
-        past_self = next_self;
     }
     if !hit_eos && collapse_runaway(&mut tokens) {
         debug!("runaway decode collapsed to {} tokens", tokens.len() - 1);

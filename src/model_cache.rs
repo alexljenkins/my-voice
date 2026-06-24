@@ -229,8 +229,8 @@ mod tests {
         assert_eq!(warms.load(Ordering::SeqCst), 1, "warm runs once per load");
     }
 
-    /// The default `warm()` routes through `transcribe` (so split decoders warm
-    /// both graphs). Verify the trait default actually calls `transcribe`.
+    /// The default `warm()` routes through `transcribe`. Verify the trait
+    /// default actually calls `transcribe`.
     #[test]
     fn default_warm_calls_transcribe() {
         struct DefaultWarm {

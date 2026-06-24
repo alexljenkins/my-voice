@@ -3,4 +3,3 @@ _*.md
 graphify-out
 *.wav
 !/samples/*.wav
-/hf-upload
