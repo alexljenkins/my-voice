@@ -23,6 +23,9 @@ pub struct Config {
     pub min_speech_ms: u64,
     pub trailing_silence_ms: u64,
     pub injection: String,
+    /// Whole-word, case-insensitive find→replace pairs applied last in
+    /// post-processing — fixes proper nouns/jargon the model never learns.
+    pub corrections: Vec<(String, String)>,
 }
 
 impl Default for Config {
@@ -40,6 +43,7 @@ impl Default for Config {
             min_speech_ms: 300,
             trailing_silence_ms: 150,
             injection: "auto".into(),
+            corrections: Vec::new(),
         }
     }
 }
@@ -92,6 +96,7 @@ impl Config {
             "min_speech_ms",
             "trailing_silence_ms",
             "injection",
+            "corrections",
         ];
         if let Ok(value) = toml::from_str::<toml::Table>(raw) {
             for key in value.keys() {
@@ -195,6 +200,17 @@ mod tests {
         assert_eq!(back.min_speech_ms, 300);
         assert_eq!(back.trailing_silence_ms, 150);
         assert!(back.quantized);
+    }
+
+    #[test]
+    fn corrections_round_trip() {
+        let raw = r#"corrections = [["git hub", "GitHub"], ["my voice", "my-voice"]]"#;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.corrections.len(), 2);
+        assert_eq!(cfg.corrections[0], ("git hub".into(), "GitHub".into()));
+        let toml = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&toml).unwrap();
+        assert_eq!(back.corrections, cfg.corrections);
     }
 
     #[test]
