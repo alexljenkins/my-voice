@@ -53,6 +53,12 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     wav: Option<PathBuf>,
 
+    /// With --wav: transcribe N times warm (model loaded+warmed once) and log
+    /// per-iteration encode/decode + peak RSS. For the perf bench, not the gate.
+    #[cfg(feature = "debug-tools")]
+    #[arg(long, value_name = "N", default_value_t = 1)]
+    bench_iters: usize,
+
     /// Save each recording to <DIR>/<timestamp>.wav (and _raw.wav) while running
     /// the normal hold-to-talk flow. Press Ctrl+C when done collecting samples.
     #[arg(long, value_name = "DIR")]
@@ -157,7 +163,7 @@ fn run(cli: Cli) -> Result<()> {
 
     #[cfg(feature = "debug-tools")]
     if let Some(path) = cli.wav.as_deref() {
-        return run_wav(&config, path);
+        return run_wav(&config, path, cli.bench_iters.max(1));
     }
 
     run_daemon(config, cli.config, cli.record)
@@ -230,7 +236,7 @@ fn run_set_hotkey(config_path: Option<&Path>) -> Result<()> {
 /// Feed a wav file straight through the transcriber — isolates the inference
 /// path from the mic/capture path. Resamples to 16 kHz mono if needed.
 #[cfg(feature = "debug-tools")]
-fn run_wav(config: &Config, path: &std::path::Path) -> Result<()> {
+fn run_wav(config: &Config, path: &std::path::Path, iters: usize) -> Result<()> {
     let mut reader = hound::WavReader::open(path).with_context(|| format!("opening {path:?}"))?;
     let spec = reader.spec();
     let ch = spec.channels.max(1) as usize;
@@ -258,10 +264,40 @@ fn run_wav(config: &Config, path: &std::path::Path) -> Result<()> {
         spec.sample_rate,
         samples.len() as f32 / 16_000.0
     );
+    // create() loads + warms the model once, so every pass below is warm. The
+    // first pass produces the text we print; extra passes (--bench-iters > 1)
+    // only re-time the warm steady state, which is what a daemon user feels.
     let mut transcriber = transcriber::create(config)?;
-    let text = post_process(&transcriber.transcribe(&samples)?, &config.corrections);
+    let mut text = String::new();
+    for _ in 0..iters {
+        text = post_process(&transcriber.transcribe(&samples)?, &config.corrections);
+    }
+    if let Some(kb) = peak_rss_kb() {
+        info!("peak RSS {kb} kB");
+    }
     println!("{text}");
     Ok(())
+}
+
+/// Process peak resident set size (`VmHWM`) in kB, Linux only. The high-water
+/// mark over the whole run = model + ONNX arenas + buffers, i.e. the daemon's
+/// real memory footprint. Returns None where /proc isn't available.
+#[cfg(feature = "debug-tools")]
+fn peak_rss_kb() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        for line in status.lines() {
+            if let Some(rest) = line.strip_prefix("VmHWM:") {
+                return rest.split_whitespace().next()?.parse().ok();
+            }
+        }
+        None
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
 }
 
 /// Record a fixed 3s window, dump a debug wav, transcribe, and print — verifies
