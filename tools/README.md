@@ -2,6 +2,23 @@
 
 Dev tool for benchmarking capture quality. Requires the binary but no running daemon.
 
+## Benchmark dataset (downloaded on demand)
+
+The WER benchmark audio (`samples/*.wav`) is **not committed** — only the labels
+`samples/expected.txt` are. Materialise the audio locally with:
+
+```bash
+./tools/fetch-librispeech-samples.sh   # ~330 MB tarball (cached), 100 clips
+```
+
+It pulls a deterministic 100-clip subset of LibriSpeech `test-other` (CC BY 4.0),
+converts each to 16 kHz mono WAV, and regenerates `samples/expected.txt`. The
+default `SEED`/counts select the same clips on any machine. Tune via env —
+`COUNT`, `LONG_COUNT`, `SHORT_MAX`, `LONG_MAX`, `SEED`, `SPLIT=test-clean`; see
+the script header. References are verbatim (ALL-CAPS, spelled-out numbers), so
+track the harness's normalized `WER` column, not `strict`. To record your own
+samples instead, use the `--record` flow below.
+
 ## 1. Build release binary
 
 ```bash

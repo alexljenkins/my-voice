@@ -1,12 +1,100 @@
-1781151399_raw.wav	Hello hello this is a test
-1781151431_raw.wav	Hello hello test number two
-1781151452_raw.wav	This is perfect, amazing job
-1781155689_raw.wav	What do you want to shop for?
-1781155800_raw.wav	Hello hello hello
-1782260187_raw.wav	Hi, I was just checking we can correctly identify speech patterns from a real voice in our system.
-1782260855_raw.wav	You have power over your mind, not outside of it. Realize this and you will find strength.
-1782260887_raw.wav	It's not what happens to you, but how you react to it that matters.
-1782260923_raw.wav	External things are not the problem. It's your assessment of them, which you can erase right now.
-1782260948_raw.wav	If you are distressed by anything external, the pain is not due to the thing itself, but to your estimate of it. And this, you have the power to revoke at any time.
-1782261264_raw.wav	I think I can count from 1 to 2, 3, 4, 5, 99, 7,245 and beyond. But these are just numbers.
-1782261304_raw.wav	I wonder what happens on the 2nd of November, the 3rd of November, the 23rd of January, and the 9th of next month.
+ls_1688-142285-0000.wav	There's iron, they say, in all our blood, and a grain or two perhaps is good; but his, he makes me harshly feel, has got a little too much of steel. Anon.
+ls_1688-142285-0009.wav	Why it might have been in the workhouse
+ls_1688-142285-0021.wav	Margaret was collecting her mother's working materials and preparing to go to bed.
+ls_1688-142285-0040.wav	I'm better in not being torn to pieces by coughing o'nights, but I'm weary and tired o Milton, and longing to get away to the land o Beulah; and when I think I'm farther and farther off, my heart sinks, and I'm no better, I'm worse.
+ls_1688-142285-0064.wav	But hoo's come at last, and hoo's welcome as long as hoo'll keep from preaching on what hoo knows nought about.
+ls_1688-142285-0087.wav	Missus Thornton, the only mother he has, I believe, said Mister Hale quietly.
+ls_1998-29455-0008.wav	See im crost the road there, see him.
+ls_1998-29455-0011.wav	Ow'm I to wheel the bloomin pram if you goes on like as if you was a bag of eels?
+ls_1998-29455-0012.wav	I like you nexter my own daddy and Mister Baxter next door.
+ls_1998-29455-0029.wav	Clever as a traindawg e is, an all outer is own ead.
+ls_2414-128291-0002.wav	When, however, Zarathustra was quite nigh unto them, then did he hear plainly that a human voice spake in the midst of the kine, and apparently all of them had turned their heads towards the speaker.
+ls_2414-128291-0024.wav	Thou amiable one.
+ls_2414-159411-0014.wav	3 out of the 6 had given judgment against the Brahman, but still he did not lose all hope and determined to ask the other 3.
+ls_2609-156975-0002.wav	Let us have faith that right makes might, and in that faith let us dare to do our duty as we understand it. Lincoln.
+ls_2609-156975-0005.wav	The absence of detailed reference to the Hebrews is therefore perfectly natural.
+ls_2609-157645-0005.wav	Another eighteenth century clerical worthy, the famous Doctor Parr, an inveterate smoker, was accustomed to do what Mister Disney prevented Archbishop Blackburn from doing; he smoked in his vestry at Hatton.
+ls_2609-169640-0012.wav	A breathless stillness succeeded.
+ls_2609-169640-0014.wav	I heard the rattling of the boarding pikes too, as they were cut adrift from the spanker boom and fell upon the decks.
+ls_2609-169640-0015.wav	Kite went aft and returned with 3 or 4 muskets and as many pikes.
+ls_2609-169640-0016.wav	The stillness that reigned on both sides was like that of death.
+ls_2609-169640-0018.wav	The question was now whether we could pass them or not before they got near enough to grapple.
+ls_3005-163390-0007.wav	What we want is to go out of here quiet and talk this show up and sell the rest of the town.
+ls_3005-163399-0015.wav	So I says to myself, here's another place where I got to resk the truth.
+ls_3080-5032-0012.wav	But it seems this gentleman is not so easy access, but you may acknowledge something due to me if I incline him to look graciously upon you, and therefore there is not much harm done.
+ls_3080-5032-0020.wav	If I had a picture that were fit for you, you should have it.
+ls_3080-5040-0018.wav	Directed for your master.
+ls_3080-5040-0023.wav	How welcome you will be, but alas.
+ls_3331-159605-0036.wav	Minnie said the other day she wished she was a pigeon so she could paddle in the puddles and not fuss about rubbers.
+ls_3331-159609-0011.wav	None were needed; her telltale face answered for her as well as the impulse which made her hide her head in the sofa cushion like a foolish ostrich when the hunters are after it.
+ls_3528-168669-0067.wav	You will raise the stone with the bar by means of the ring, but—
+ls_3528-168669-0099.wav	You will close the coffin; the sisters will carry it to the chapel.
+ls_3538-163622-0015.wav	When they had gone thus for a long long way, the foal again asked, dost thou see anything now?
+ls_3538-163622-0017.wav	It looks like the trunk of a great thick birch tree.
+ls_3538-163622-0021.wav	And now, inquired the foal, seest thou nothing now?
+ls_367-293981-0003.wav	Though your worship was not so badly off, having in your arms that incomparable beauty you spoke of, but I, what did I have except the heaviest whacks I think I had in all my life?
+ls_3764-168670-0055.wav	The priest says the prayers, makes the sign of the cross, sprinkles the holy water, and takes his departure.
+ls_3764-168671-0027.wav	It is true, nevertheless, that grave diggers do die themselves.
+ls_3997-182399-0006.wav	Way back in the days when Grandpap Buzzard had his lil falling out with ol King Eagle and done fly so high he sco'tch the feathers offen his haid, he had a cousin, did Grandpap Buzzard, and this cousin was jes naturally lazy and no count.
+ls_3997-182399-0011.wav	One day this no count trifling cousin of Grandpap Buzzard get cold in his feet.
+ls_4198-12259-0035.wav	I have a remedy against thirst, quite contrary to that which is good against the biting of a mad dog.
+ls_4198-12259-0037.wav	O Lachryma Christi, it is of the best grape.
+ls_4294-35475-0007.wav	Thou shalt have thy liberty, he cried, even though thou shouldst rend me in pieces the moment thou art free.
+ls_4294-35475-0022.wav	The grandame whom he supplied with fagots, the merchant whom he rescued from robbers, the king's councillor to whom he gave aid, all became his friends; up and down the land, to beggar or lord, homeless wanderer or high born dame, he gladly gave unselfish service, all unsought, and such as he helped straightway became his friends.
+ls_4294-9934-0024.wav	The landlord presented his bill, which had to be paid on the spot.
+ls_4350-10919-0032.wav	It seemed as though some piece of good fortune had come to pass after the doctor had gone.
+ls_4350-9170-0025.wav	The reason to which he gave expression is essentially the same as that which made the French kings and the popes engage Swiss and Scotch guards, and makes the Russian authorities of to day so carefully distribute the recruits, so that the regiments from the frontiers are stationed in central districts and the regiments from the center are stationed on the frontiers.
+ls_4350-9170-0029.wav	And so every government needs an army also to protect its booty from its neighbor brigands.
+ls_4350-9170-0034.wav	And by this means all citizens are under arms to support the iniquities practiced upon them; all citizens have become their own oppressors.
+ls_4852-28311-0026.wav	A sudden car horn woke him from his dream.
+ls_4852-28312-0025.wav	No electric signs, no lamplit streets.
+ls_4852-28319-0000.wav	The learning of magic was by no means easy.
+ls_533-1066-0022.wav	There's one thing sure, I'll not be suspected of complicity.
+ls_533-131562-0007.wav	Muttered he, starting back, she's the very devil for spite.
+ls_533-131564-0001.wav	Mister and Missus Hattersley have been staying at the Grove a fortnight, and as Mister Hargrave is still absent and the weather was remarkably fine, I never passed a day without seeing my 2 friends Milicent and Esther either there or here.
+ls_5442-41168-0013.wav	Levin advanced, but utterly forgetting what he was to do, and much embarrassed, he turned to Sergey Ivanovitch with the question, where am I to put it?
+ls_5442-41168-0021.wav	In reply Snetkov spoke of the trust the noblemen of the province had placed in him, the affection they had shown him, which he did not deserve, as his only merit had been his attachment to the nobility to whom he had devoted 12 years of service.
+ls_5442-41169-0014.wav	That it may be, but still it ought to be treated a little more respectfully.
+ls_5442-41169-0021.wav	We walked about the fields and the garden. No, said he, Stepan Vassilievitch, everything's well looked after, but your garden's neglected.
+ls_5484-24317-0026.wav	Hermon listened to the pair in silence.
+ls_5484-24317-0030.wav	Only, even though love has wholly disappeared, she still claims consideration, and Althea did not wish to lose Hermon's regard.
+ls_5764-299665-0024.wav	If they give up one god they imagine another.
+ls_5764-299665-0037.wav	The greatest of human beings has said conscience is born of love.
+ls_5764-299665-0074.wav	It follows that there could not have been any intelligence, any design back of matter and force.
+ls_5764-299665-0076.wav	Every event has parents.
+ls_6070-63485-0009.wav	Did you see in the cabaret we have just left, for I know you again, the man whom the charcoal man came to seek?
+ls_6070-86744-0002.wav	My father, the Comte de Morcerf, although of Spanish origin, possesses considerable influence both at the court of France and Madrid, and I unhesitatingly place the best services of myself and all to whom my life is dear at your disposal.
+ls_6128-63240-0004.wav	He was tall and lean and dressed throughout in black; his shirt collar was low and wide, and the triangle of linen a little crumpled, exhibited by the opening of his waistcoat, was adorned by a pin containing a small red stone.
+ls_6128-63244-0002.wav	Perhaps she could speak for them more than for some others.
+ls_6128-63244-0013.wav	Raise the standard among them and bring me a thousand names.
+ls_6128-63244-0021.wav	They would be names of women, weak, insulted, persecuted, but devoted in every pulse of their being to the cause and asking no better fate than to die for it.
+ls_6432-63722-0052.wav	If you'll excuse me, I'll pretend I'm fishing and I may catch something.
+ls_6432-63722-0057.wav	Yes, it still holds good.
+ls_6432-63722-0059.wav	And there's no reason you shouldn't know.
+ls_6432-63723-0000.wav	Chuckled the colonel, as he skilfully played the luckless trout now struggling to get loose from the hook.
+ls_6432-63723-0014.wav	Larch, by refusing to appear, practically admitted the charges against him and did not oppose the separation.
+ls_6432-63723-0047.wav	That is not always, but sometimes it happened to be so now.
+ls_6432-63723-0050.wav	I said I was golfing, he went on, exceedingly distinctly, though with an effort.
+ls_6938-70848-0000.wav	Even the sun came out pale and watery at noon.
+ls_6938-70848-0026.wav	The villages will save us in the end.
+ls_6938-70848-0027.wav	But the present movement is international, and that is why it is invincible.
+ls_7018-75789-0002.wav	Land after land shalt thou seek and find, but no other life on thy wish shall wait, fret not thy soul in thy thoughts, O Night, all woes shall end, or sooner or late.
+ls_7018-75789-0031.wav	When suddenly a violent squall of wind arose and smote the ship, which rose out of the water and settled upon a great reef, the haunt of sea monsters, where it broke up and fell asunder into planks, and all and everything on board were plunged into the sea.
+ls_7105-2330-0013.wav	7:30, amended the Prime Minister, we must avoid any appearance of precipitancy.
+ls_7105-2330-0024.wav	The chief organiser rang off.
+ls_7105-2340-0029.wav	Husband and wife looked blankly and desperately at one another.
+ls_7902-96591-0009.wav	It all comes of dressing up in this stupid way like a rough fisher lad.
+ls_7902-96591-0024.wav	A fellow who was shut up in prison for life might do it, he said, but not in a case like this.
+ls_7902-96592-0008.wav	And why did Andy call Mister Gurr father?
+ls_7902-96594-0000.wav	Seemed in good spirits last night, Mister Gurr, eh?
+ls_7902-96595-0022.wav	Surely, cried Sir Risdon excitedly.
+ls_7975-280057-0000.wav	These hatreds were soon to make trouble for me of which I had never dreamed.
+ls_7975-280057-0019.wav	One of my old school teachers whom I have never seen since the spring or summer of 1862 is Stephen B. Elkins, Senator from West Virginia.
+ls_7975-280076-0009.wav	At the time of the Gallatin Bank robbery I was gathering cattle in Ellis County, Texas, cattle that I bought from Pleas Taylor and Rector.
+ls_7975-280076-0026.wav	I stayed there until the eighth of February 1874.
+ls_7975-280085-0016.wav	Sheriff Glispin of Watonwan County, who was taking Bob's pistol from him, was also shouting to the fellow.
+ls_8131-117016-0050.wav	Ever see a Martian election?
+ls_8131-117029-0013.wav	Finally got our orders for you, it's Mercury.
+ls_8131-117029-0021.wav	I, I, oh drat it, I'm getting old, Izzy, you tell him.
+ls_8188-269290-0000.wav	The Guild of Saint Elizabeth.
+ls_8280-266249-0029.wav	There was a pause, broken by young Horace, who had been watching a group of men gathered about a table at the further end of the room.
