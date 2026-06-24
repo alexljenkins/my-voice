@@ -115,10 +115,9 @@ impl Moonshine {
         let decoder = if let Some(with_past_path) =
             pick(dir, &["decoder_with_past_model_quantized.onnx"])
         {
-            let initial_path =
-                pick(dir, &["decoder_model_quantized.onnx"]).ok_or_else(|| {
-                    anyhow!("split decoder missing no-past graph in {}", dir.display())
-                })?;
+            let initial_path = pick(dir, &["decoder_model_quantized.onnx"]).ok_or_else(|| {
+                anyhow!("split decoder missing no-past graph in {}", dir.display())
+            })?;
             let initial = build_session(&initial_path, threads)?;
             let with_past = build_session(&with_past_path, threads)?;
             let n_layers = initial

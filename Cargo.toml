@@ -22,6 +22,9 @@ tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
 
 # CLI + config
 clap = { version = "4", features = ["derive"] }
+# Pure-Rust, generation-only: shell completions + man page. Never in the hot path.
+clap_complete = "4"
+clap_mangen = "0.2"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 dirs = "5"

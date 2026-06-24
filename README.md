@@ -159,6 +159,8 @@ Run `my-voice --list-devices` to see device names, then set `audio_device = "Hea
 
 On Linux, right-click the tray icon to adjust model, microphone, paste mode, and startup settings — no config file needed.
 
+Run `my-voice --status` to check whether the daemon is running (and which model it's set to). Generate a shell completion script with `my-voice --completions <bash|zsh|fish|...>` (e.g. `my-voice --completions bash > /etc/bash_completion.d/my-voice`).
+
 ---
 
 <details>
