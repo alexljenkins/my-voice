@@ -15,6 +15,11 @@ const TARGET_RATE: u32 = 16_000;
 const EMERGENCY_SECONDS: usize = 27;
 const RAW_WINDOW_MS: u64 = 20;
 const RAW_SPEECH_RMS: f32 = 0.008;
+const FORCE_SPLIT_AFTER_SOFT_MS: u64 = 18_000;
+
+fn force_split_ms(soft_max_ms: u64) -> u64 {
+    soft_max_ms.saturating_add(FORCE_SPLIT_AFTER_SOFT_MS)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DrainReason {
@@ -231,7 +236,7 @@ impl AudioRecorder {
         let duration_ms = len as u64 * 1000 / self.sample_rate as u64;
         let emergency = self.overrun.swap(false, Ordering::Relaxed);
         let reason = if emergency
-            || duration_ms >= max_ms.saturating_add(3000)
+            || duration_ms >= force_split_ms(max_ms)
             || (duration_ms >= max_ms && self.trailing_silence_ms >= 120)
         {
             Some(DrainReason::MaxDuration)
@@ -751,6 +756,11 @@ mod tests {
         append_mono(&buf, &[0.1f32, 0.2, 0.3], 1, 2, &overrun);
         assert_eq!(*lock_buf(&buf), vec![0.1, 0.2, 0.3]);
         assert!(overrun.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn nine_second_soft_boundary_forces_at_twenty_seven_seconds() {
+        assert_eq!(super::force_split_ms(9_000), 27_000);
     }
 
     #[test]
