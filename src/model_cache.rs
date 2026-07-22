@@ -106,16 +106,32 @@ impl ModelCache {
     /// run). Blocks on the same lock the preload holds, so there's no double
     /// load and no race. With `timeout_secs == 0` the model is dropped before
     /// returning — reload-every-use mode.
+    #[allow(dead_code)]
     pub fn transcribe(&self, audio: &[f32]) -> Result<String> {
+        self.transcribe_inner(audio, false)
+    }
+
+    pub fn transcribe_for_hold(&self, audio: &[f32]) -> Result<String> {
+        self.transcribe_inner(audio, true)
+    }
+
+    fn transcribe_inner(&self, audio: &[f32], keep_loaded: bool) -> Result<String> {
         let mut slot = self.lock_slot();
         load_locked(&mut slot, &self.factory)?;
         let text = slot.as_mut().unwrap().transcribe(audio)?;
         *self.lock_last_used() = Instant::now();
-        if self.timeout_secs == 0 {
+        if self.timeout_secs == 0 && !keep_loaded {
             *slot = None;
             debug!("model unloaded (load_timeout_secs = 0)");
         }
         Ok(text)
+    }
+
+    pub fn finish_hold(&self) {
+        if self.timeout_secs == 0 {
+            *self.lock_slot() = None;
+            debug!("model unloaded after segmented hold");
+        }
     }
 
     /// Spawn the background evictor. No-op for `timeout_secs <= 0`: negative
