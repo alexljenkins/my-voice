@@ -180,11 +180,11 @@ impl Injector for XdotoolInjector {
 }
 
 fn ydotool_type_args(text: &str) -> [&str; 5] {
-    ["type", "--key-delay=0", "--key-hold=0", "--", text]
+    ["type", "--key-delay=1", "--key-hold=1", "--", text]
 }
 
 fn xdotool_type_args(text: &str) -> [&str; 6] {
-    ["type", "--clearmodifiers", "--delay", "0", "--", text]
+    ["type", "--clearmodifiers", "--delay", "1", "--", text]
 }
 
 /// Injects via the AT-SPI accessibility bus, one keysym event per character.
@@ -481,14 +481,14 @@ mod tests {
     }
 
     #[test]
-    fn external_typers_use_zero_delay() {
+    fn external_typers_use_one_millisecond_delay() {
         assert_eq!(
             xdotool_type_args("hello"),
-            ["type", "--clearmodifiers", "--delay", "0", "--", "hello"]
+            ["type", "--clearmodifiers", "--delay", "1", "--", "hello"]
         );
         assert_eq!(
             ydotool_type_args("hello"),
-            ["type", "--key-delay=0", "--key-hold=0", "--", "hello"]
+            ["type", "--key-delay=1", "--key-hold=1", "--", "hello"]
         );
     }
 }
