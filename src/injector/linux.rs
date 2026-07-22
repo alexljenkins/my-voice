@@ -155,7 +155,7 @@ impl Injector for YdotoolInjector {
     fn inject(&mut self, text: &str) -> Result<()> {
         let socket_str = self.socket.to_string_lossy();
         let status = Command::new("ydotool")
-            .args(["type", "--", text])
+            .args(ydotool_type_args(text))
             .env("YDOTOOL_SOCKET", socket_str.as_ref())
             .status()?;
         if status.success() {
@@ -172,11 +172,19 @@ impl Injector for YdotoolInjector {
 struct XdotoolInjector;
 impl Injector for XdotoolInjector {
     fn inject(&mut self, text: &str) -> Result<()> {
-        run_argv("xdotool", &["type", "--clearmodifiers", "--", text])
+        run_argv("xdotool", &xdotool_type_args(text))
     }
     fn name(&self) -> &'static str {
         "xdotool"
     }
+}
+
+fn ydotool_type_args(text: &str) -> [&str; 5] {
+    ["type", "--key-delay=0", "--key-hold=0", "--", text]
+}
+
+fn xdotool_type_args(text: &str) -> [&str; 6] {
+    ["type", "--clearmodifiers", "--delay", "0", "--", text]
 }
 
 /// Injects via the AT-SPI accessibility bus, one keysym event per character.
@@ -470,5 +478,17 @@ mod tests {
     fn clipboard_injector_name() {
         let inj = build_clipboard();
         assert_eq!(inj.name(), "clipboard");
+    }
+
+    #[test]
+    fn external_typers_use_zero_delay() {
+        assert_eq!(
+            xdotool_type_args("hello"),
+            ["type", "--clearmodifiers", "--delay", "0", "--", "hello"]
+        );
+        assert_eq!(
+            ydotool_type_args("hello"),
+            ["type", "--key-delay=0", "--key-hold=0", "--", "hello"]
+        );
     }
 }
