@@ -141,11 +141,15 @@ fn run_argv(cmd: &str, args: &[&str]) -> Result<()> {
 struct WtypeInjector;
 impl Injector for WtypeInjector {
     fn inject(&mut self, text: &str) -> Result<()> {
-        run_argv("wtype", &["--", text])
+        run_argv("wtype", &wtype_type_args(text))
     }
     fn name(&self) -> &'static str {
         "wtype"
     }
+}
+
+fn wtype_type_args(text: &str) -> [&str; 4] {
+    ["-d", "1", "--", text]
 }
 
 struct YdotoolInjector {
@@ -482,6 +486,7 @@ mod tests {
 
     #[test]
     fn external_typers_use_one_millisecond_delay() {
+        assert_eq!(wtype_type_args("hello"), ["-d", "1", "--", "hello"]);
         assert_eq!(
             xdotool_type_args("hello"),
             ["type", "--clearmodifiers", "--delay", "1", "--", "hello"]
