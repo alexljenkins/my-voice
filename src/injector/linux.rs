@@ -19,7 +19,7 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use tracing::{debug, info, warn};
 
-use super::Injector;
+use super::{DeliveryMode, Injector};
 use crate::config::Config;
 
 /// `KeySynthType::KEY_SYM` — generate a key event for a given X keysym.
@@ -220,6 +220,9 @@ impl Injector for ArboardInjector {
     fn name(&self) -> &'static str {
         "clipboard"
     }
+    fn delivery_mode(&self) -> DeliveryMode {
+        DeliveryMode::Clipboard
+    }
 }
 
 // --- chain injector ---
@@ -256,6 +259,13 @@ impl Injector for ChainInjector {
             self.chain[self.cursor].name()
         } else {
             "clipboard-fallback"
+        }
+    }
+    fn delivery_mode(&self) -> DeliveryMode {
+        if self.cursor < self.chain.len() {
+            DeliveryMode::Typed
+        } else {
+            DeliveryMode::Clipboard
         }
     }
 }

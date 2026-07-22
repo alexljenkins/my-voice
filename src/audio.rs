@@ -1,6 +1,7 @@
 //! AudioRecorder: cpal input stream, mono downmix, sinc/FFT resample to 16 kHz.
 //! Pipeline: native-rate capture → rubato FFT resample → WebRTC APM → peak normalize → VAD silence trim.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{anyhow, Context, Result};
@@ -11,7 +12,24 @@ use sonora::{AudioProcessing, Config, StreamConfig};
 use tracing::{debug, error, info};
 
 const TARGET_RATE: u32 = 16_000;
-const MAX_SECONDS: usize = 60;
+const EMERGENCY_SECONDS: usize = 27;
+const RAW_WINDOW_MS: u64 = 20;
+const RAW_SPEECH_RMS: f32 = 0.008;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainReason {
+    Pause,
+    MaxDuration,
+    Release,
+}
+
+#[derive(Debug)]
+pub struct DrainedSegment {
+    pub raw: Vec<f32>,
+    pub raw_rate: u32,
+    pub observed_speech_ms: u64,
+    pub reason: DrainReason,
+}
 
 pub struct AudioRecorder {
     device: cpal::Device,
@@ -20,6 +38,10 @@ pub struct AudioRecorder {
     sample_rate: u32,
     buffer: Arc<Mutex<Vec<f32>>>,
     stream: Option<cpal::Stream>,
+    detector_pos: usize,
+    observed_speech_ms: u64,
+    trailing_silence_ms: u64,
+    overrun: Arc<AtomicBool>,
     /// Invoked (from cpal's error callback thread) when the stream dies
     /// mid-capture — e.g. the microphone is unplugged.
     error_cb: Option<Arc<dyn Fn(String) + Send + Sync>>,
@@ -36,14 +58,18 @@ impl AudioRecorder {
         let (sample_format, channels, sample_rate) = select_stream_config(&device)?;
         info!("audio device: {name} ({sample_rate} Hz, {channels} ch, {sample_format:?})");
 
-        let cap = sample_rate as usize * MAX_SECONDS;
+        let cap = sample_rate as usize * EMERGENCY_SECONDS;
         Ok(Self {
             device,
             sample_format,
             channels,
             sample_rate,
-            buffer: Arc::new(Mutex::new(Vec::with_capacity(cap.min(16_000 * 60)))),
+            buffer: Arc::new(Mutex::new(Vec::with_capacity(cap))),
             stream: None,
+            detector_pos: 0,
+            observed_speech_ms: 0,
+            trailing_silence_ms: 0,
+            overrun: Arc::new(AtomicBool::new(false)),
             error_cb: None,
         })
     }
@@ -57,6 +83,7 @@ impl AudioRecorder {
     /// Open the input stream and begin appending mono samples to the buffer.
     pub fn start(&mut self) -> Result<()> {
         lock_buf(&self.buffer).clear();
+        self.reset_detector();
 
         let config = cpal::StreamConfig {
             channels: self.channels as u16,
@@ -64,7 +91,9 @@ impl AudioRecorder {
             buffer_size: cpal::BufferSize::Default,
         };
         let channels = self.channels;
-        let cap = self.sample_rate as usize * MAX_SECONDS;
+        let cap = self.sample_rate as usize * EMERGENCY_SECONDS;
+        self.overrun.store(false, Ordering::Relaxed);
+        let overrun = self.overrun.clone();
         let buf = self.buffer.clone();
         let cb = self.error_cb.clone();
         let err_fn = move |e: cpal::StreamError| {
@@ -80,61 +109,61 @@ impl AudioRecorder {
         let stream = match self.sample_format {
             SampleFormat::F32 => self.device.build_input_stream(
                 &config,
-                move |data: &[f32], _| append_mono(&buf, data, channels, cap),
+                move |data: &[f32], _| append_mono(&buf, data, channels, cap, &overrun),
                 err_fn,
                 None,
             ),
             SampleFormat::F64 => self.device.build_input_stream(
                 &config,
-                move |data: &[f64], _| append_mono(&buf, data, channels, cap),
+                move |data: &[f64], _| append_mono(&buf, data, channels, cap, &overrun),
                 err_fn,
                 None,
             ),
             SampleFormat::I8 => self.device.build_input_stream(
                 &config,
-                move |data: &[i8], _| append_mono(&buf, data, channels, cap),
+                move |data: &[i8], _| append_mono(&buf, data, channels, cap, &overrun),
                 err_fn,
                 None,
             ),
             SampleFormat::I16 => self.device.build_input_stream(
                 &config,
-                move |data: &[i16], _| append_mono(&buf, data, channels, cap),
+                move |data: &[i16], _| append_mono(&buf, data, channels, cap, &overrun),
                 err_fn,
                 None,
             ),
             SampleFormat::I32 => self.device.build_input_stream(
                 &config,
-                move |data: &[i32], _| append_mono(&buf, data, channels, cap),
+                move |data: &[i32], _| append_mono(&buf, data, channels, cap, &overrun),
                 err_fn,
                 None,
             ),
             SampleFormat::I64 => self.device.build_input_stream(
                 &config,
-                move |data: &[i64], _| append_mono(&buf, data, channels, cap),
+                move |data: &[i64], _| append_mono(&buf, data, channels, cap, &overrun),
                 err_fn,
                 None,
             ),
             SampleFormat::U8 => self.device.build_input_stream(
                 &config,
-                move |data: &[u8], _| append_mono(&buf, data, channels, cap),
+                move |data: &[u8], _| append_mono(&buf, data, channels, cap, &overrun),
                 err_fn,
                 None,
             ),
             SampleFormat::U16 => self.device.build_input_stream(
                 &config,
-                move |data: &[u16], _| append_mono(&buf, data, channels, cap),
+                move |data: &[u16], _| append_mono(&buf, data, channels, cap, &overrun),
                 err_fn,
                 None,
             ),
             SampleFormat::U32 => self.device.build_input_stream(
                 &config,
-                move |data: &[u32], _| append_mono(&buf, data, channels, cap),
+                move |data: &[u32], _| append_mono(&buf, data, channels, cap, &overrun),
                 err_fn,
                 None,
             ),
             SampleFormat::U64 => self.device.build_input_stream(
                 &config,
-                move |data: &[u64], _| append_mono(&buf, data, channels, cap),
+                move |data: &[u64], _| append_mono(&buf, data, channels, cap, &overrun),
                 err_fn,
                 None,
             ),
@@ -152,9 +181,11 @@ impl AudioRecorder {
     pub fn cancel(&mut self) {
         self.stream = None;
         lock_buf(&self.buffer).clear();
+        self.reset_detector();
     }
 
     /// Stop the stream and return 16 kHz mono f32 samples in [-1, 1].
+    #[cfg_attr(not(feature = "debug-tools"), allow(dead_code))]
     pub fn stop(&mut self) -> Vec<f32> {
         let (_, _, processed) = self.stop_with_raw();
         processed
@@ -163,9 +194,10 @@ impl AudioRecorder {
     /// Stop the stream and return both the raw native-rate mono samples and the
     /// fully processed 16 kHz samples. The raw buffer is at `self.sample_rate`
     /// and is useful for writing a before/after comparison WAV.
+    #[cfg_attr(not(feature = "debug-tools"), allow(dead_code))]
     pub fn stop_with_raw(&mut self) -> (Vec<f32>, u32, Vec<f32>) {
-        self.stream = None; // drop → stop the stream
-        let raw = std::mem::take(&mut *lock_buf(&self.buffer));
+        let segment = self.stop_raw();
+        let raw = segment.raw;
         let raw_peak = raw.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
         debug!(
             "captured {} samples at {} Hz ({:.2}s), raw peak {raw_peak:.3}",
@@ -179,6 +211,79 @@ impl AudioRecorder {
         (raw, self.sample_rate, processed)
     }
 
+    pub fn stop_raw(&mut self) -> DrainedSegment {
+        self.stream = None;
+        self.update_detector();
+        let raw = std::mem::take(&mut *lock_buf(&self.buffer));
+        let segment = DrainedSegment {
+            raw,
+            raw_rate: self.sample_rate,
+            observed_speech_ms: self.observed_speech_ms,
+            reason: DrainReason::Release,
+        };
+        self.reset_detector();
+        segment
+    }
+
+    pub fn try_drain_segment(&mut self, pause_ms: u64, max_ms: u64) -> Option<DrainedSegment> {
+        self.update_detector();
+        let len = lock_buf(&self.buffer).len();
+        let duration_ms = len as u64 * 1000 / self.sample_rate as u64;
+        let emergency = self.overrun.swap(false, Ordering::Relaxed);
+        let reason = if emergency
+            || duration_ms >= max_ms.saturating_add(3000)
+            || (duration_ms >= max_ms && self.trailing_silence_ms >= 120)
+        {
+            Some(DrainReason::MaxDuration)
+        } else if self.observed_speech_ms > 0 && self.trailing_silence_ms >= pause_ms {
+            Some(DrainReason::Pause)
+        } else {
+            None
+        }?;
+        if emergency {
+            error!(
+                duration_ms,
+                "capture poll stalled beyond emergency capacity; forcing drain"
+            );
+        }
+        let raw = std::mem::take(&mut *lock_buf(&self.buffer));
+        let speech = self.observed_speech_ms;
+        self.reset_detector();
+        if reason == DrainReason::MaxDuration && speech == 0 {
+            debug!(duration_ms, "discarded silent maximum-duration segment");
+            return None;
+        }
+        Some(DrainedSegment {
+            raw,
+            raw_rate: self.sample_rate,
+            observed_speech_ms: speech,
+            reason,
+        })
+    }
+
+    fn update_detector(&mut self) {
+        let b = lock_buf(&self.buffer);
+        let window = (self.sample_rate as u64 * RAW_WINDOW_MS / 1000) as usize;
+        while self.detector_pos + window <= b.len() {
+            let w = &b[self.detector_pos..self.detector_pos + window];
+            let rms = (w.iter().map(|s| s * s).sum::<f32>() / w.len() as f32).sqrt();
+            if rms >= RAW_SPEECH_RMS {
+                self.observed_speech_ms += RAW_WINDOW_MS;
+                self.trailing_silence_ms = 0;
+            } else if self.observed_speech_ms > 0 {
+                self.trailing_silence_ms += RAW_WINDOW_MS;
+            }
+            self.detector_pos += window;
+        }
+    }
+
+    fn reset_detector(&mut self) {
+        self.detector_pos = 0;
+        self.observed_speech_ms = 0;
+        self.trailing_silence_ms = 0;
+    }
+
+    #[cfg_attr(not(feature = "debug-tools"), allow(dead_code))]
     pub fn target_rate(&self) -> u32 {
         TARGET_RATE
     }
@@ -259,9 +364,15 @@ fn lock_buf(buf: &Mutex<Vec<f32>>) -> MutexGuard<'_, Vec<f32>> {
 }
 
 /// Append interleaved samples to the shared buffer, converting to f32 and
-/// downmixing to mono by averaging across channels. Caps at `cap` samples.
-fn append_mono<T>(buf: &Arc<Mutex<Vec<f32>>>, data: &[T], channels: usize, cap: usize)
-where
+/// downmixing to mono by averaging across channels. Crossing `cap` flags the
+/// daemon to force-drain; samples continue growing so a delayed poll loses none.
+fn append_mono<T>(
+    buf: &Arc<Mutex<Vec<f32>>>,
+    data: &[T],
+    channels: usize,
+    cap: usize,
+    overrun: &AtomicBool,
+) where
     T: Sample,
     f32: FromSample<T>,
 {
@@ -269,7 +380,7 @@ where
     let denom = channels.max(1) as f32;
     for frame in data.chunks(channels.max(1)) {
         if b.len() >= cap {
-            break;
+            overrun.store(true, Ordering::Relaxed);
         }
         let sum: f32 = frame.iter().map(|s| f32::from_sample(*s)).sum();
         b.push(sum / denom);
@@ -601,6 +712,7 @@ mod tests {
     };
     use cpal::SampleFormat;
     use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     /// Poison the buffer mutex (panic while holding it), then assert lock_buf still
@@ -628,8 +740,17 @@ mod tests {
             panic!("poison the lock");
         }));
         assert!(buf.is_poisoned());
-        append_mono(&buf, &[0.5f32, 0.5], 1, 16);
+        append_mono(&buf, &[0.5f32, 0.5], 1, 16, &AtomicBool::new(false));
         assert_eq!(*lock_buf(&buf), vec![0.5, 0.5]);
+    }
+
+    #[test]
+    fn append_mono_flags_capacity_without_dropping_samples() {
+        let buf = Arc::new(Mutex::new(Vec::<f32>::new()));
+        let overrun = AtomicBool::new(false);
+        append_mono(&buf, &[0.1f32, 0.2, 0.3], 1, 2, &overrun);
+        assert_eq!(*lock_buf(&buf), vec![0.1, 0.2, 0.3]);
+        assert!(overrun.load(Ordering::Relaxed));
     }
 
     #[test]
