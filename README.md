@@ -15,9 +15,6 @@ Hold **CapsLock**, speak, release — your words appear in whatever app is focus
 ### Linux
 
 ```sh
-# 0. Install build dependencies (audio capture)
-sudo apt install -y libasound2-dev pkg-config
-
 # 1. Install Rust (skip if you already have it)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source ~/.cargo/env

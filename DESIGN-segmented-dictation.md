@@ -37,11 +37,11 @@ Add:
 
 ```toml
 segment_pause_ms = 300
-segment_max_ms = 9000
+segment_max_ms = 30000
 ```
 
 - `segment_pause_ms`: independent from `trailing_silence_ms`. Start at 300ms.
-- `segment_max_ms`: soft maximum for continuous speech. Start at 9s. Before 9s, require the normal 300ms pause. From 9s onward, accept a smaller 120ms voice gap; at 27s (`segment_max_ms + 18000ms`) split unconditionally.
+- `segment_max_ms`: 30s soft maximum. The required pause shrinks linearly from 300ms to 120ms as the segment grows. At 48s (`segment_max_ms + 18000ms`), split unconditionally.
 - Poll capture state every 200ms while recording (see the `recv_timeout` note under `src/main.rs` — no ticker thread).
 
 Both keys must also be added to `Config` + `Default` and to the `known` array in `warn_unknown_keys` (`src/config.rs:100`), or a config that sets them logs spurious unknown-key warnings, and to the config block in `README.md`. Neither belongs in `reload_actions`: they are read live at drain time, so a reload needs no rebuild.
@@ -76,8 +76,8 @@ The drain returns **raw samples only**. Resampling and `process_capture` happen 
 - Inspect only enough trailing raw audio to update windowed RMS/silence state; do not clone the growing buffer on every poll.
 - Maintain whether speech has actually been observed plus consecutive silent duration. Total buffer duration is not proof of speech.
 - Use a raw-input RMS threshold that is separately named, tested, and logged. If one fixed threshold is unreliable during microphone testing, replace this detector with an adaptive noise-floor/VAD implementation; do not borrow the post-processing threshold.
-- Before `segment_max_ms`, drain when speech was observed and trailing silence reaches `segment_pause_ms` (300ms).
-- From `segment_max_ms` onward, drain on a shorter 120ms trailing voice gap. At `segment_max_ms + 18000ms`, drain unconditionally even during uninterrupted speech.
+- Before `segment_max_ms`, drain when speech was observed and trailing silence reaches the adaptive threshold. The threshold shrinks from `segment_pause_ms` to 120ms.
+- From `segment_max_ms` onward, drain on a 120ms voice gap. At `segment_max_ms + 18000ms`, drain unconditionally during uninterrupted speech.
 - `mem::take` the buffer under its mutex, then release the lock immediately. No processing under the lock, and none on the daemon thread.
 - A `MaxDuration` drain with no speech observed (peak below the raw silence floor) is discarded in the drain and never enqueued — holding the key silently must not spend inference on pure noise.
 - Keep the cpal stream alive throughout.
@@ -85,7 +85,7 @@ The drain returns **raw samples only**. Resampling and `process_capture` happen 
 
 `stop_with_raw` remains the release path in concept: stop the stream first and take the final raw buffer, but enqueue processing on the worker like every other segment. Silent/too-short tails may be discarded downstream.
 
-Remove silent truncation from `append_mono`. Preallocate 27s as emergency capacity, but do not treat capacity as a write cap: `append_mono` continues appending if it is exceeded and sets an overrun flag for the next poll to log and force-drain. At 48kHz mono f32, 27s is about 5MB; temporary growth is safer than audio loss. Normal operation hard-splits at 27s.
+Remove silent truncation from `append_mono`. Preallocate 60s as emergency capacity, but do not treat capacity as a write cap: `append_mono` continues appending if it is exceeded and sets an overrun flag for the next poll to log and force-drain. At 48kHz mono f32, 60s is about 11MB. Temporary growth is safer than audio loss. Normal operation hard-splits at 48s.
 
 ### Native-rate capture
 
@@ -164,6 +164,7 @@ Join non-empty segment text with one ASCII space. Do not add a leading space bef
 
 - Change `Injector::inject` to return the effective `DeliveryMode::{Typed, Clipboard}`. This reports what actually happened on every platform, including Linux chain demotion and macOS CGEvent → pbcopy fallback.
 - **Typing mode:** inject only the newly joined chunk, prefixed with a space after the first successfully injected chunk.
+- **External typing speed:** use 1ms key spacing for `wtype`, `xdotool`, and `ydotool`. Zero-delay typing drops events in some target apps.
 - **Clipboard-only mode:** append to `accumulated_text`, then overwrite the clipboard with the complete accumulated hold after every result. On release, clipboard therefore contains the full dictation rather than only the last segment.
 - **Automatic clipboard fallback:** when `inject` first returns `Clipboard`, mark the hold clipboard-deferred. Keep accumulating subsequent results but do not inject them. After keyup and all segment results complete, overwrite the clipboard once with the complete accumulated hold. The fallback call may have temporarily copied only its current chunk; the final write must replace it with the full hold.
 
@@ -199,7 +200,8 @@ Write one raw and one processed WAV per drained segment, sharing `hold_id` and z
 
 - Pause drain requires observed speech plus sustained raw silence.
 - Short silence does not drain.
-- At 9s, a 120ms voice gap drains continuous speech; at 27s, uninterrupted speech drains unconditionally.
+- The pause threshold shrinks from 300ms to 120ms across the 30s soft window.
+- At 30s, a 120ms voice gap drains continuous speech. At 48s, uninterrupted speech drains unconditionally.
 - Drain resets detector state and leaves stream logically active.
 - Empty/all-silent segments do not alter first-segment spacing.
 - Segment results remain ordered and stale `hold_id` results are ignored.
@@ -212,7 +214,7 @@ Write one raw and one processed WAV per drained segment, sharing `hold_id` and z
 - A hold that never reaches cumulative `min_speech_ms` delivers nothing.
 - A short speech-bearing tail after a forced split is delivered once the hold has qualified.
 - A `MaxDuration` drain with no observed speech is discarded without enqueuing.
-- Exceeding 27s emergency capacity continues capture, forces a drain, logs, and never drops samples.
+- Exceeding 60s emergency capacity continues capture, forces a drain, logs, and never drops samples.
 
 ### Manual acceptance
 
