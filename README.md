@@ -1,6 +1,8 @@
 # my-voice
 
-Hold **CapsLock**, speak, release — your words appear in whatever app is focused. No cloud, no subscription. Everything runs locally on your computer.
+Hold **CapsLock** and speak. Each completed phrase appears when you pause, while my-voice keeps listening. Release the key to send the final words.
+
+No cloud. No subscription. Everything runs locally on your computer.
 
 ## Requirements
 
@@ -59,9 +61,7 @@ echo 'uinput' | sudo tee -a /etc/modules-load.d/modules.conf
 
 ### Text doesn't appear (GNOME / Wayland)
 
-`wtype` doesn't work on GNOME Wayland. my-voice automatically falls back to **AT-SPI** (GNOME's accessibility bus), which is on by default and needs no setup.
-
-If AT-SPI is disabled or a specific app ignores it, install `ydotool`:
+GNOME Wayland blocks the synthetic events used by `wtype` and AT-SPI. Install `ydotool` for direct typing:
 
 ```sh
 sudo apt install ydotool
@@ -154,8 +154,11 @@ Run `my-voice --list-devices` to see device names, then set `audio_device = "Hea
 
 | Action | Result |
 |---|---|
-| Hold **CapsLock** → speak → release | Text typed into focused window |
-| Hold **Shift+CapsLock** → speak → release | Text copied to clipboard |
+| Hold **CapsLock** and speak | Completed phrases appear in the focused window when you pause |
+| Release **CapsLock** | The final phrase appears and recording stops |
+| Hold **Shift+CapsLock** and speak | The clipboard updates as each phrase completes |
+
+Keep holding the key for long dictation. There is no total recording limit. Natural pauses create segments, and continuous speech splits automatically in the background.
 
 On Linux, right-click the tray icon to adjust model, microphone, paste mode, and startup settings — no config file needed.
 
@@ -203,8 +206,7 @@ Run `my-voice --config /path/to/file.toml` to use an alternate config file.
 | `moonshine-streaming-small` | ~345 MB | ~15× real-time | **Default**; best accuracy-per-MB |
 | `moonshine-streaming-medium` | ~566 MB | ~12× real-time | Best accuracy |
 
-Every model is Moonshine (ONNX, English-only). The `streaming-*` variants are
-run as a single push-to-talk pass over the whole utterance, not chunk-by-chunk.
+Every model is Moonshine (ONNX, English-only). my-voice transcribes pause-bounded segments while the key remains held. This provides progressive phrase delivery, not a live word-by-word preview.
 
 Switch models from the **Model** submenu in the tray (Linux), or by editing `model` in the config file. Run `my-voice --download` after changing the model.
 
