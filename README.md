@@ -180,8 +180,8 @@ grab = true                 # Linux: exclusive grab + virtual keyboard passthrou
 audio_device = ""           # substring match against device name; "" = system default
 min_speech_ms = 300         # discard holds shorter than this (prevents accidental triggers)
 trailing_silence_ms = 300   # extra audio captured after release (catches word endings)
-segment_pause_ms = 300      # transcribe after this natural pause while key stays held
-segment_max_ms = 9000       # soft boundary; hard split follows at +18 seconds
+segment_pause_ms = 300      # pause threshold; shrinks toward 120ms as a segment grows
+segment_max_ms = 30000      # 30s soft boundary; hard split follows at +18 seconds
 injection = "auto"          # auto | wtype | xdotool | ydotool | atspi | clipboard
 corrections = []            # whole-word, case-insensitive fixes, e.g.
                             # [["git hub", "GitHub"], ["my voice", "my-voice"]]

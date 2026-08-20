@@ -12,13 +12,50 @@ use sonora::{AudioProcessing, Config, StreamConfig};
 use tracing::{debug, error, info};
 
 const TARGET_RATE: u32 = 16_000;
-const EMERGENCY_SECONDS: usize = 27;
+const CAPTURE_PREALLOC_SECONDS: usize = 60;
 const RAW_WINDOW_MS: u64 = 20;
 const RAW_SPEECH_RMS: f32 = 0.008;
 const FORCE_SPLIT_AFTER_SOFT_MS: u64 = 18_000;
+const MIN_SEGMENT_PAUSE_MS: u64 = 120;
 
 fn force_split_ms(soft_max_ms: u64) -> u64 {
     soft_max_ms.saturating_add(FORCE_SPLIT_AFTER_SOFT_MS)
+}
+
+/// Reduce the pause needed to close a segment as it approaches the soft cap.
+/// A fresh segment waits for a natural pause. At the soft cap, even a short
+/// hesitation closes it. Continuous speech gets another 18 seconds before a
+/// forced split.
+fn adaptive_pause_ms(initial_pause_ms: u64, duration_ms: u64, soft_max_ms: u64) -> u64 {
+    let initial = initial_pause_ms.max(MIN_SEGMENT_PAUSE_MS);
+    if soft_max_ms == 0 || duration_ms >= soft_max_ms {
+        return MIN_SEGMENT_PAUSE_MS;
+    }
+    let reduction =
+        (initial - MIN_SEGMENT_PAUSE_MS) as u128 * duration_ms as u128 / soft_max_ms as u128;
+    initial - reduction as u64
+}
+
+fn segment_drain_reason(
+    duration_ms: u64,
+    observed_speech_ms: u64,
+    trailing_silence_ms: u64,
+    initial_pause_ms: u64,
+    soft_max_ms: u64,
+    emergency: bool,
+) -> Option<DrainReason> {
+    if emergency || duration_ms >= force_split_ms(soft_max_ms) {
+        return Some(DrainReason::MaxDuration);
+    }
+    let required_pause_ms = adaptive_pause_ms(initial_pause_ms, duration_ms, soft_max_ms);
+    if observed_speech_ms == 0 || trailing_silence_ms < required_pause_ms {
+        return None;
+    }
+    Some(if duration_ms >= soft_max_ms {
+        DrainReason::MaxDuration
+    } else {
+        DrainReason::Pause
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,7 +100,7 @@ impl AudioRecorder {
         let (sample_format, channels, sample_rate) = select_stream_config(&device)?;
         info!("audio device: {name} ({sample_rate} Hz, {channels} ch, {sample_format:?})");
 
-        let cap = sample_rate as usize * EMERGENCY_SECONDS;
+        let cap = sample_rate as usize * CAPTURE_PREALLOC_SECONDS;
         Ok(Self {
             device,
             sample_format,
@@ -96,7 +133,7 @@ impl AudioRecorder {
             buffer_size: cpal::BufferSize::Default,
         };
         let channels = self.channels;
-        let cap = self.sample_rate as usize * EMERGENCY_SECONDS;
+        let cap = self.sample_rate as usize * CAPTURE_PREALLOC_SECONDS;
         self.overrun.store(false, Ordering::Relaxed);
         let overrun = self.overrun.clone();
         let buf = self.buffer.clone();
@@ -235,16 +272,14 @@ impl AudioRecorder {
         let len = lock_buf(&self.buffer).len();
         let duration_ms = len as u64 * 1000 / self.sample_rate as u64;
         let emergency = self.overrun.swap(false, Ordering::Relaxed);
-        let reason = if emergency
-            || duration_ms >= force_split_ms(max_ms)
-            || (duration_ms >= max_ms && self.trailing_silence_ms >= 120)
-        {
-            Some(DrainReason::MaxDuration)
-        } else if self.observed_speech_ms > 0 && self.trailing_silence_ms >= pause_ms {
-            Some(DrainReason::Pause)
-        } else {
-            None
-        }?;
+        let reason = segment_drain_reason(
+            duration_ms,
+            self.observed_speech_ms,
+            self.trailing_silence_ms,
+            pause_ms,
+            max_ms,
+            emergency,
+        )?;
         if emergency {
             error!(
                 duration_ms,
@@ -712,8 +747,8 @@ fn card_friendly_names() -> std::collections::HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_mono, apply_audio_processing, card_id, format_rank, high_level_label, lock_buf,
-        resample,
+        adaptive_pause_ms, append_mono, apply_audio_processing, card_id, force_split_ms,
+        format_rank, high_level_label, lock_buf, resample, segment_drain_reason, DrainReason,
     };
     use cpal::SampleFormat;
     use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -759,8 +794,55 @@ mod tests {
     }
 
     #[test]
-    fn nine_second_soft_boundary_forces_at_twenty_seven_seconds() {
-        assert_eq!(super::force_split_ms(9_000), 27_000);
+    fn pause_requirement_shrinks_toward_soft_cap() {
+        assert_eq!(adaptive_pause_ms(300, 0, 30_000), 300);
+        assert_eq!(adaptive_pause_ms(300, 10_000, 30_000), 240);
+        assert_eq!(adaptive_pause_ms(300, 20_000, 30_000), 180);
+        assert_eq!(adaptive_pause_ms(300, 30_000, 30_000), 120);
+        assert_eq!(adaptive_pause_ms(300, 40_000, 30_000), 120);
+    }
+
+    #[test]
+    fn pause_requirement_never_drops_below_detector_window_floor() {
+        assert_eq!(adaptive_pause_ms(50, 0, 30_000), 120);
+        assert_eq!(adaptive_pause_ms(300, 1, 0), 120);
+    }
+
+    #[test]
+    fn thirty_second_soft_boundary_forces_at_forty_eight_seconds() {
+        assert_eq!(force_split_ms(30_000), 48_000);
+    }
+
+    #[test]
+    fn segment_drain_tracks_the_shrinking_pause() {
+        assert_eq!(
+            segment_drain_reason(1_000, 700, 293, 300, 30_000, false),
+            None
+        );
+        assert_eq!(
+            segment_drain_reason(1_000, 700, 294, 300, 30_000, false),
+            Some(DrainReason::Pause)
+        );
+        assert_eq!(
+            segment_drain_reason(20_000, 18_000, 180, 300, 30_000, false),
+            Some(DrainReason::Pause)
+        );
+        assert_eq!(
+            segment_drain_reason(30_000, 28_000, 120, 300, 30_000, false),
+            Some(DrainReason::MaxDuration)
+        );
+    }
+
+    #[test]
+    fn segment_drain_requires_speech_until_the_hard_cap() {
+        assert_eq!(
+            segment_drain_reason(30_000, 0, 30_000, 300, 30_000, false),
+            None
+        );
+        assert_eq!(
+            segment_drain_reason(48_000, 0, 48_000, 300, 30_000, false),
+            Some(DrainReason::MaxDuration)
+        );
     }
 
     #[test]

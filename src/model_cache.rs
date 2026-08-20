@@ -273,6 +273,27 @@ mod tests {
         assert_eq!(warms.load(Ordering::SeqCst), 1, "warm runs once per load");
     }
 
+    #[test]
+    fn zero_timeout_keeps_one_model_for_each_segmented_hold() {
+        let builds = Arc::new(AtomicUsize::new(0));
+        let b = Arc::clone(&builds);
+        let cache = ModelCache::with_factory(
+            0,
+            Box::new(move || {
+                b.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(OkTranscriber) as Box<dyn Transcriber>)
+            }),
+        );
+
+        cache.transcribe_for_hold(&[0.0]).unwrap();
+        cache.transcribe_for_hold(&[0.0]).unwrap();
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+
+        cache.finish_hold();
+        cache.transcribe_for_hold(&[0.0]).unwrap();
+        assert_eq!(builds.load(Ordering::SeqCst), 2);
+    }
+
     /// The default `warm()` routes through `transcribe`. Verify the trait
     /// default actually calls `transcribe`.
     #[test]

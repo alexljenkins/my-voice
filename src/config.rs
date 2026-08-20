@@ -45,7 +45,7 @@ impl Default for Config {
             min_speech_ms: 300,
             trailing_silence_ms: 300,
             segment_pause_ms: 300,
-            segment_max_ms: 9000,
+            segment_max_ms: 30_000,
             injection: "auto".into(),
             corrections: Vec::new(),
         }
@@ -223,7 +223,7 @@ mod tests {
         assert_eq!(back.min_speech_ms, 300);
         assert_eq!(back.trailing_silence_ms, 300);
         assert_eq!(back.segment_pause_ms, 300);
-        assert_eq!(back.segment_max_ms, 9000);
+        assert_eq!(back.segment_max_ms, 30_000);
         assert!(back.quantized);
     }
 

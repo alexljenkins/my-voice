@@ -343,7 +343,6 @@ struct SegmentRequest {
     cache: Arc<ModelCache>,
     corrections: Vec<(String, String)>,
     record_dir: Option<PathBuf>,
-    last: bool,
 }
 
 struct SegmentResult {
@@ -363,7 +362,6 @@ fn spawn_transcription_worker(tx: mpsc::Sender<DaemonMsg>) -> SyncSender<Segment
                 cache,
                 corrections,
                 record_dir,
-                last,
             } = request;
             debug!(?segment.reason, hold_id, segment_index, "processing audio segment");
             let processed = audio::process_capture(
@@ -393,9 +391,6 @@ fn spawn_transcription_worker(tx: mpsc::Sender<DaemonMsg>) -> SyncSender<Segment
                     .map(|text| (!text.is_empty()).then_some(text))
                     .map_err(|e| format!("{e:#}"))
             };
-            if last {
-                cache.finish_hold();
-            }
             let _ = tx.send(DaemonMsg::SegmentComplete(SegmentResult {
                 hold_id,
                 segment_index,
@@ -533,7 +528,6 @@ fn run_daemon(
             Err(RecvTimeoutError::Timeout) => {
                 if let State::Recording(hold) = &mut state {
                     if let Some(pending) = hold.pending_drain.take() {
-                        let last = hold.released;
                         match queue_segment(
                             &segment_tx,
                             hold,
@@ -541,17 +535,20 @@ fn run_daemon(
                             &cache,
                             &config,
                             &record_dir,
-                            last,
                         ) {
                             Ok(()) => {}
                             Err(pending) => {
                                 hold.pending_drain = Some(pending);
-                                warn!("transcription queue remained full; stopping hold");
-                                recorder.cancel();
-                                hold.released = true;
-                                ui.set_state(TrayState::Error(
-                                    "Transcription can't keep up".into(),
-                                ));
+                                if hold.released {
+                                    debug!("waiting for transcription queue space");
+                                } else {
+                                    warn!("transcription queue remained full; stopping hold");
+                                    recorder.cancel();
+                                    hold.released = true;
+                                    ui.set_state(TrayState::Error(
+                                        "Transcription can't keep up".into(),
+                                    ));
+                                }
                             }
                         }
                     } else if !hold.released {
@@ -565,7 +562,6 @@ fn run_daemon(
                                 &cache,
                                 &config,
                                 &record_dir,
-                                false,
                             ) {
                                 warn!("transcription queue full; retaining one segment");
                                 hold.pending_drain = Some(segment);
@@ -619,42 +615,14 @@ fn run_daemon(
                     let segment = recorder.stop_raw();
                     if let State::Recording(hold) = &mut state {
                         hold.released = true;
-                        if let Some(pending) = hold.pending_drain.take() {
-                            if let Err(pending) = queue_segment(
-                                &segment_tx,
-                                hold,
-                                pending,
-                                &cache,
-                                &config,
-                                &record_dir,
-                                false,
-                            ) {
-                                hold.pending_drain = Some(pending);
-                                hold.delivery_failed = true;
-                                ui.set_state(TrayState::Error(
-                                    "Transcription can't keep up".into(),
-                                ));
-                            }
-                        }
-                        if !segment.raw.is_empty() {
-                            if hold.pending_drain.is_none() {
-                                if let Err(segment) = queue_segment(
-                                    &segment_tx,
-                                    hold,
-                                    segment,
-                                    &cache,
-                                    &config,
-                                    &record_dir,
-                                    true,
-                                ) {
-                                    hold.pending_drain = Some(segment);
-                                    hold.delivery_failed = true;
-                                }
-                            } else {
-                                hold.delivery_failed = true;
-                            }
-                        } else {
-                            cache.finish_hold();
+                        let segment = match hold.pending_drain.take() {
+                            Some(pending) => merge_release_segment(pending, segment),
+                            None => segment,
+                        };
+                        if let Err(segment) =
+                            queue_segment(&segment_tx, hold, segment, &cache, &config, &record_dir)
+                        {
+                            hold.pending_drain = Some(segment);
                         }
                     }
                 }
@@ -715,6 +683,7 @@ fn run_daemon(
                 if finished {
                     let failed =
                         matches!(&state, State::Recording(h) if h.delivery_failed || h.audio_error);
+                    cache.finish_hold();
                     state = State::Idle;
                     if !failed {
                         ui.set_state(TrayState::Ready);
@@ -1115,6 +1084,18 @@ fn append_joined(target: &mut String, text: &str) {
     target.push_str(text);
 }
 
+/// Preserve the final live audio when a previously drained segment is waiting
+/// for queue space. Both buffers are contiguous samples from the same stream.
+fn merge_release_segment(mut pending: DrainedSegment, tail: DrainedSegment) -> DrainedSegment {
+    debug_assert_eq!(pending.raw_rate, tail.raw_rate);
+    pending.raw.extend(tail.raw);
+    pending.observed_speech_ms = pending
+        .observed_speech_ms
+        .saturating_add(tail.observed_speech_ms);
+    pending.reason = audio::DrainReason::Release;
+    pending
+}
+
 fn deliver_text(
     hold: &mut HoldState,
     text: &str,
@@ -1159,7 +1140,6 @@ fn queue_segment(
     cache: &Arc<ModelCache>,
     config: &Config,
     record_dir: &Option<PathBuf>,
-    last: bool,
 ) -> std::result::Result<(), DrainedSegment> {
     let index = hold.next_segment;
     let speech = segment.observed_speech_ms;
@@ -1170,7 +1150,6 @@ fn queue_segment(
         cache: Arc::clone(cache),
         corrections: config.corrections.clone(),
         record_dir: record_dir.clone(),
-        last,
     };
     match tx.try_send(request) {
         Ok(()) => {
@@ -1376,6 +1355,60 @@ mod single_instance {
 mod tests {
     use super::*;
 
+    struct RecordingInjector {
+        injected: Vec<String>,
+        mode: DeliveryMode,
+    }
+
+    impl RecordingInjector {
+        fn typed() -> Self {
+            Self {
+                injected: Vec::new(),
+                mode: DeliveryMode::Typed,
+            }
+        }
+
+        fn clipboard() -> Self {
+            Self {
+                injected: Vec::new(),
+                mode: DeliveryMode::Clipboard,
+            }
+        }
+    }
+
+    impl Injector for RecordingInjector {
+        fn inject(&mut self, text: &str) -> Result<()> {
+            self.injected.push(text.to_owned());
+            Ok(())
+        }
+
+        fn delivery_mode(&self) -> DeliveryMode {
+            self.mode
+        }
+
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+    }
+
+    fn hold_state() -> HoldState {
+        HoldState {
+            hold_id: 1,
+            clipboard_only: false,
+            next_segment: 0,
+            pending_segments: 0,
+            observed_speech_ms: 0,
+            deferred_text: Vec::new(),
+            accumulated_text: String::new(),
+            delivered_any: false,
+            clipboard_deferred: false,
+            delivery_failed: false,
+            released: false,
+            audio_error: false,
+            pending_drain: None,
+        }
+    }
+
     fn cfg() -> Config {
         Config::default()
     }
@@ -1392,6 +1425,42 @@ mod tests {
                 restart: false,
             }
         );
+    }
+
+    #[test]
+    fn typed_segments_are_incremental_and_joined_once() {
+        let mut hold = hold_state();
+        let mut typer = RecordingInjector::typed();
+        let mut clipper = RecordingInjector::clipboard();
+
+        deliver_text(&mut hold, "first phrase", &mut typer, &mut clipper);
+        deliver_text(&mut hold, "second phrase", &mut typer, &mut clipper);
+
+        assert_eq!(typer.injected, ["first phrase", " second phrase"]);
+        assert!(clipper.injected.is_empty());
+        assert_eq!(hold.accumulated_text, "first phrase second phrase");
+    }
+
+    #[test]
+    fn release_merge_keeps_all_captured_audio() {
+        let pending = DrainedSegment {
+            raw: vec![1.0, 2.0],
+            raw_rate: 16_000,
+            observed_speech_ms: 200,
+            reason: audio::DrainReason::Pause,
+        };
+        let tail = DrainedSegment {
+            raw: vec![3.0, 4.0],
+            raw_rate: 16_000,
+            observed_speech_ms: 100,
+            reason: audio::DrainReason::Release,
+        };
+
+        let merged = merge_release_segment(pending, tail);
+
+        assert_eq!(merged.raw, [1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(merged.observed_speech_ms, 300);
+        assert_eq!(merged.reason, audio::DrainReason::Release);
     }
 
     #[test]
