@@ -19,7 +19,7 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use tracing::{debug, info, warn};
 
-use super::Injector;
+use super::{DeliveryMode, Injector};
 use crate::config::Config;
 
 /// `KeySynthType::KEY_SYM` — generate a key event for a given X keysym.
@@ -141,11 +141,15 @@ fn run_argv(cmd: &str, args: &[&str]) -> Result<()> {
 struct WtypeInjector;
 impl Injector for WtypeInjector {
     fn inject(&mut self, text: &str) -> Result<()> {
-        run_argv("wtype", &["--", text])
+        run_argv("wtype", &wtype_type_args(text))
     }
     fn name(&self) -> &'static str {
         "wtype"
     }
+}
+
+fn wtype_type_args(text: &str) -> [&str; 4] {
+    ["-d", "1", "--", text]
 }
 
 struct YdotoolInjector {
@@ -155,7 +159,7 @@ impl Injector for YdotoolInjector {
     fn inject(&mut self, text: &str) -> Result<()> {
         let socket_str = self.socket.to_string_lossy();
         let status = Command::new("ydotool")
-            .args(["type", "--", text])
+            .args(ydotool_type_args(text))
             .env("YDOTOOL_SOCKET", socket_str.as_ref())
             .status()?;
         if status.success() {
@@ -172,11 +176,19 @@ impl Injector for YdotoolInjector {
 struct XdotoolInjector;
 impl Injector for XdotoolInjector {
     fn inject(&mut self, text: &str) -> Result<()> {
-        run_argv("xdotool", &["type", "--clearmodifiers", "--", text])
+        run_argv("xdotool", &xdotool_type_args(text))
     }
     fn name(&self) -> &'static str {
         "xdotool"
     }
+}
+
+fn ydotool_type_args(text: &str) -> [&str; 5] {
+    ["type", "--key-delay=2", "--key-hold=2", "--", text]
+}
+
+fn xdotool_type_args(text: &str) -> [&str; 6] {
+    ["type", "--clearmodifiers", "--delay", "1", "--", text]
 }
 
 /// Injects via the AT-SPI accessibility bus, one keysym event per character.
@@ -220,6 +232,9 @@ impl Injector for ArboardInjector {
     fn name(&self) -> &'static str {
         "clipboard"
     }
+    fn delivery_mode(&self) -> DeliveryMode {
+        DeliveryMode::Clipboard
+    }
 }
 
 // --- chain injector ---
@@ -256,6 +271,13 @@ impl Injector for ChainInjector {
             self.chain[self.cursor].name()
         } else {
             "clipboard-fallback"
+        }
+    }
+    fn delivery_mode(&self) -> DeliveryMode {
+        if self.cursor < self.chain.len() {
+            DeliveryMode::Typed
+        } else {
+            DeliveryMode::Clipboard
         }
     }
 }
@@ -460,5 +482,18 @@ mod tests {
     fn clipboard_injector_name() {
         let inj = build_clipboard();
         assert_eq!(inj.name(), "clipboard");
+    }
+
+    #[test]
+    fn external_typers_use_fast_reliable_delays() {
+        assert_eq!(wtype_type_args("hello"), ["-d", "1", "--", "hello"]);
+        assert_eq!(
+            xdotool_type_args("hello"),
+            ["type", "--clearmodifiers", "--delay", "1", "--", "hello"]
+        );
+        assert_eq!(
+            ydotool_type_args("hello"),
+            ["type", "--key-delay=2", "--key-hold=2", "--", "hello"]
+        );
     }
 }

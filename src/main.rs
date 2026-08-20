@@ -14,10 +14,10 @@ mod transcriber;
 mod ui;
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::mpsc::{self, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -25,10 +25,10 @@ use clap::Parser;
 use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use audio::AudioRecorder;
+use audio::{AudioRecorder, DrainedSegment};
 use config::Config;
 use hotkey::{spawn_listener, HotkeyEvent};
-use injector::Injector;
+use injector::{DeliveryMode, Injector};
 use model_cache::ModelCache;
 use text::post_process;
 use ui::{ModelItem, TrayMenuState, TrayState, UiCommand, UiHandle};
@@ -333,6 +333,72 @@ enum DaemonMsg {
     /// The keybind-capture subprocess committed a new hotkey to disk.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     HotkeyCaptured,
+    SegmentComplete(SegmentResult),
+}
+
+struct SegmentRequest {
+    hold_id: u64,
+    segment_index: u32,
+    segment: DrainedSegment,
+    cache: Arc<ModelCache>,
+    corrections: Vec<(String, String)>,
+    record_dir: Option<PathBuf>,
+}
+
+struct SegmentResult {
+    hold_id: u64,
+    segment_index: u32,
+    text: Result<Option<String>, String>,
+}
+
+fn spawn_transcription_worker(tx: mpsc::Sender<DaemonMsg>) -> SyncSender<SegmentRequest> {
+    let (request_tx, request_rx) = mpsc::sync_channel::<SegmentRequest>(3);
+    thread::spawn(move || {
+        for request in request_rx {
+            let SegmentRequest {
+                hold_id,
+                segment_index,
+                segment,
+                cache,
+                corrections,
+                record_dir,
+            } = request;
+            debug!(?segment.reason, hold_id, segment_index, "processing audio segment");
+            let processed = audio::process_capture(
+                &audio::resample(&segment.raw, segment.raw_rate, 16_000),
+                16_000,
+            );
+            if let Some(dir) = record_dir {
+                let stem = format!("{hold_id}_{segment_index:04}");
+                let _ = write_wav(
+                    &segment.raw,
+                    segment.raw_rate,
+                    &dir.join(format!("{stem}_raw.wav")).to_string_lossy(),
+                );
+                let _ = write_wav(
+                    &processed,
+                    16_000,
+                    &dir.join(format!("{stem}.wav")).to_string_lossy(),
+                );
+            }
+            let peak = processed.iter().fold(0.0f32, |a, b| a.max(b.abs()));
+            let text = if segment.observed_speech_ms == 0 || peak < 0.01 {
+                Ok(None)
+            } else {
+                cache
+                    .transcribe_for_hold(&processed)
+                    .map(|raw| post_process(&raw, &corrections))
+                    .map(|text| (!text.is_empty()).then_some(text))
+                    .map_err(|e| format!("{e:#}"))
+            };
+            let _ = tx.send(DaemonMsg::SegmentComplete(SegmentResult {
+                hold_id,
+                segment_index,
+                text,
+            }));
+        }
+    });
+    request_tx
 }
 
 fn run_daemon(
@@ -449,8 +515,64 @@ fn run_daemon(
     // A reload requested mid-utterance is deferred until we return to Idle, so
     // we never swap the recorder/model out from under an in-flight transcription.
     let mut pending_reload = false;
+    let segment_tx = spawn_transcription_worker(daemon_tx.clone());
+    let mut next_hold_id = 1u64;
 
-    for msg in daemon_rx {
+    loop {
+        let received = match state {
+            State::Idle => daemon_rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            State::Recording(_) => daemon_rx.recv_timeout(Duration::from_millis(200)),
+        };
+        let msg = match received {
+            Ok(msg) => msg,
+            Err(RecvTimeoutError::Timeout) => {
+                if let State::Recording(hold) = &mut state {
+                    if let Some(pending) = hold.pending_drain.take() {
+                        match queue_segment(
+                            &segment_tx,
+                            hold,
+                            pending,
+                            &cache,
+                            &config,
+                            &record_dir,
+                        ) {
+                            Ok(()) => {}
+                            Err(pending) => {
+                                hold.pending_drain = Some(pending);
+                                if hold.released {
+                                    debug!("waiting for transcription queue space");
+                                } else {
+                                    warn!("transcription queue remained full; stopping hold");
+                                    recorder.cancel();
+                                    hold.released = true;
+                                    ui.set_state(TrayState::Error(
+                                        "Transcription can't keep up".into(),
+                                    ));
+                                }
+                            }
+                        }
+                    } else if !hold.released {
+                        if let Some(segment) = recorder
+                            .try_drain_segment(config.segment_pause_ms, config.segment_max_ms)
+                        {
+                            if let Err(segment) = queue_segment(
+                                &segment_tx,
+                                hold,
+                                segment,
+                                &cache,
+                                &config,
+                                &record_dir,
+                            ) {
+                                warn!("transcription queue full; retaining one segment");
+                                hold.pending_drain = Some(segment);
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
         match msg {
             DaemonMsg::Hotkey(event) => match (&state, event) {
                 (State::Idle, HotkeyEvent::Press { clipboard_only }) => {
@@ -469,60 +591,39 @@ fn run_daemon(
                     });
                     debug!(clipboard_only, "recording");
                     ui.set_state(TrayState::Listening);
-                    state = State::Recording { clipboard_only };
+                    state = State::Recording(HoldState {
+                        hold_id: next_hold_id,
+                        clipboard_only,
+                        next_segment: 0,
+                        pending_segments: 0,
+                        observed_speech_ms: 0,
+                        deferred_text: Vec::new(),
+                        accumulated_text: String::new(),
+                        delivered_any: false,
+                        clipboard_deferred: false,
+                        delivery_failed: false,
+                        released: false,
+                        audio_error: false,
+                        pending_drain: None,
+                    });
+                    next_hold_id += 1;
                 }
-                (State::Recording { clipboard_only }, HotkeyEvent::Release) => {
+                (State::Recording(_), HotkeyEvent::Release) => {
                     // PTT trailing buffer: catch the tail of the last word.
                     thread::sleep(trailing);
-                    let samples = if let Some(ref dir) = record_dir {
-                        let (raw, raw_rate, processed) = recorder.stop_with_raw();
-                        let ts = SystemTime::now()
-                            .duration_since(SystemTime::UNIX_EPOCH)
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0);
-                        let proc_path = dir.join(format!("{ts}.wav"));
-                        let raw_path = dir.join(format!("{ts}_raw.wav"));
-                        if let Err(e) = write_wav(
-                            &processed,
-                            recorder.target_rate(),
-                            &proc_path.to_string_lossy(),
-                        ) {
-                            warn!("record save failed: {e}");
-                        } else {
-                            println!("saved: {}", proc_path.display());
-                        }
-                        if let Err(e) = write_wav(&raw, raw_rate, &raw_path.to_string_lossy()) {
-                            warn!("record raw save failed: {e}");
-                        }
-                        processed
-                    } else {
-                        recorder.stop()
-                    };
-                    let clipboard_only = *clipboard_only;
                     ui.set_state(TrayState::Transcribing);
-                    let inj: &mut dyn Injector = if clipboard_only {
-                        clipper.as_mut()
-                    } else {
-                        typer.as_mut()
-                    };
-                    match handle_utterance(&cache, &samples, recorder.target_rate(), &config, inj) {
-                        Ok(()) => ui.set_state(TrayState::Ready),
-                        Err(e) => ui.set_state(TrayState::Error(e)),
-                    }
-                    state = State::Idle;
-                    if pending_reload {
-                        pending_reload = false;
-                        apply_reload(
-                            &mut config,
-                            config_path.as_deref(),
-                            &mut recorder,
-                            &mut typer,
-                            &mut cache,
-                            &mut trailing,
-                            &ui,
-                            &audio_devices,
-                            &daemon_tx,
-                        );
+                    let segment = recorder.stop_raw();
+                    if let State::Recording(hold) = &mut state {
+                        hold.released = true;
+                        let segment = match hold.pending_drain.take() {
+                            Some(pending) => merge_release_segment(pending, segment),
+                            None => segment,
+                        };
+                        if let Err(segment) =
+                            queue_segment(&segment_tx, hold, segment, &cache, &config, &record_dir)
+                        {
+                            hold.pending_drain = Some(segment);
+                        }
                     }
                 }
                 // Recording+Press (autorepeat dupe) and Idle+Release (stale): ignore.
@@ -530,14 +631,63 @@ fn run_daemon(
             },
             DaemonMsg::AudioFailed(e) => {
                 warn!("audio stream failed: {e}");
-                if let State::Recording { .. } = state {
+                if let State::Recording(hold) = &mut state {
                     recorder.cancel();
-                    state = State::Idle;
+                    hold.released = true;
+                    hold.audio_error = true;
                     ui.set_state(TrayState::Error("Microphone disconnected".into()));
                     notify::send(
                         "Microphone disconnected",
                         "Recording cancelled — the audio stream reported an error.",
                     );
+                    if hold.pending_segments == 0 {
+                        cache.finish_hold();
+                        state = State::Idle;
+                    }
+                }
+            }
+            DaemonMsg::SegmentComplete(result) => {
+                let mut finished = false;
+                if let State::Recording(hold) = &mut state {
+                    if result.hold_id != hold.hold_id {
+                        continue;
+                    }
+                    debug!(segment_index = result.segment_index, "segment complete");
+                    hold.pending_segments = hold.pending_segments.saturating_sub(1);
+                    match result.text {
+                        Ok(Some(text)) if hold.observed_speech_ms >= config.min_speech_ms => {
+                            let deferred = std::mem::take(&mut hold.deferred_text);
+                            for prior in deferred {
+                                deliver_text(hold, &prior, typer.as_mut(), clipper.as_mut());
+                            }
+                            deliver_text(hold, &text, typer.as_mut(), clipper.as_mut());
+                        }
+                        Ok(Some(text)) => hold.deferred_text.push(text),
+                        Ok(None) => {}
+                        Err(e) => {
+                            warn!("segment transcription failed: {e}");
+                            hold.delivery_failed = true;
+                        }
+                    }
+                    finished =
+                        hold.released && hold.pending_segments == 0 && hold.pending_drain.is_none();
+                    if finished && hold.clipboard_deferred && !hold.accumulated_text.is_empty() {
+                        if let Err(e) = clipper.inject(&hold.accumulated_text) {
+                            warn!("final clipboard fallback failed: {e:#}");
+                        }
+                    }
+                    if finished && hold.observed_speech_ms < config.min_speech_ms {
+                        hold.deferred_text.clear();
+                    }
+                }
+                if finished {
+                    let failed =
+                        matches!(&state, State::Recording(h) if h.delivery_failed || h.audio_error);
+                    cache.finish_hold();
+                    state = State::Idle;
+                    if !failed {
+                        ui.set_state(TrayState::Ready);
+                    }
                     if pending_reload {
                         pending_reload = false;
                         apply_reload(
@@ -619,7 +769,7 @@ fn run_daemon(
                     &audio_devices,
                     &daemon_tx,
                 ),
-                State::Recording { .. } => pending_reload = true,
+                State::Recording(_) => pending_reload = true,
             },
 
             // Settings changes that require a self-restart (grab backend threads
@@ -663,7 +813,7 @@ fn run_daemon(
                         &audio_devices,
                         &daemon_tx,
                     ),
-                    State::Recording { .. } => pending_reload = true,
+                    State::Recording(_) => pending_reload = true,
                 }
             }
         }
@@ -907,56 +1057,109 @@ fn restart_self() -> ! {
 #[derive(Debug)]
 enum State {
     Idle,
-    Recording { clipboard_only: bool },
+    Recording(HoldState),
 }
 
-/// Gate, transcribe, post-process, inject. Both gates discard before inference —
-/// ASR models hallucinate text on silence, so never feed them empty air. Returns
-/// a user-facing error string on failure so the caller can surface it on the tray.
-fn handle_utterance(
-    cache: &ModelCache,
-    samples: &[f32],
-    rate: u32,
-    config: &Config,
-    injector: &mut dyn Injector,
-) -> Result<(), String> {
-    let ms = samples.len() as f32 / rate as f32 * 1000.0;
-    if ms < config.min_speech_ms as f32 {
-        debug!(
-            "discarded: {ms:.0}ms < min_speech_ms {}",
-            config.min_speech_ms
-        );
-        return Ok(());
-    }
-    let peak = samples.iter().fold(0.0f32, |a, b| a.max(b.abs()));
-    if peak < 0.01 {
-        debug!("discarded: peak {peak:.4} below silence floor");
-        return Ok(());
-    }
+#[derive(Debug)]
+struct HoldState {
+    hold_id: u64,
+    clipboard_only: bool,
+    next_segment: u32,
+    pending_segments: usize,
+    observed_speech_ms: u64,
+    deferred_text: Vec<String>,
+    accumulated_text: String,
+    delivered_any: bool,
+    clipboard_deferred: bool,
+    delivery_failed: bool,
+    released: bool,
+    audio_error: bool,
+    pending_drain: Option<DrainedSegment>,
+}
 
-    match cache.transcribe(samples) {
-        Ok(raw) => {
-            let text = post_process(&raw, &config.corrections);
-            if text.is_empty() {
-                debug!("empty transcription");
-                return Ok(());
-            }
-            if let Err(e) = injector.inject(&text) {
-                warn!("injection failed: {e:#}");
-                notify::once(
-                    notify::ErrorKind::InjectionFailed,
-                    "Text not appearing?",
-                    "my-voice couldn't type into the active app. Try switching to \
-                     clipboard mode in the my-voice menu, then paste with Ctrl+V.",
-                );
-                return Err("Text didn't appear in the active app".into());
-            }
+fn append_joined(target: &mut String, text: &str) {
+    if !target.is_empty() {
+        target.push(' ');
+    }
+    target.push_str(text);
+}
+
+/// Preserve the final live audio when a previously drained segment is waiting
+/// for queue space. Both buffers are contiguous samples from the same stream.
+fn merge_release_segment(mut pending: DrainedSegment, tail: DrainedSegment) -> DrainedSegment {
+    debug_assert_eq!(pending.raw_rate, tail.raw_rate);
+    pending.raw.extend(tail.raw);
+    pending.observed_speech_ms = pending
+        .observed_speech_ms
+        .saturating_add(tail.observed_speech_ms);
+    pending.reason = audio::DrainReason::Release;
+    pending
+}
+
+fn deliver_text(
+    hold: &mut HoldState,
+    text: &str,
+    typer: &mut dyn Injector,
+    clipper: &mut dyn Injector,
+) {
+    append_joined(&mut hold.accumulated_text, text);
+    if hold.delivery_failed || hold.clipboard_deferred {
+        return;
+    }
+    if hold.clipboard_only {
+        if let Err(e) = clipper.inject(&hold.accumulated_text) {
+            warn!("clipboard delivery failed: {e:#}");
+            hold.delivery_failed = true;
+        }
+        return;
+    }
+    let chunk = if hold.delivered_any {
+        format!(" {text}")
+    } else {
+        text.to_string()
+    };
+    match typer.inject_effective(&chunk) {
+        Ok(DeliveryMode::Typed) => hold.delivered_any = true,
+        Ok(DeliveryMode::Clipboard) => hold.clipboard_deferred = true,
+        Err(e) => {
+            warn!("injection failed: {e:#}");
+            notify::once(
+                notify::ErrorKind::InjectionFailed,
+                "Text not appearing?",
+                "my-voice couldn't type into the active app. Switch to clipboard mode and paste with Ctrl+V.",
+            );
+            hold.delivery_failed = true;
+        }
+    }
+}
+
+fn queue_segment(
+    tx: &SyncSender<SegmentRequest>,
+    hold: &mut HoldState,
+    segment: DrainedSegment,
+    cache: &Arc<ModelCache>,
+    config: &Config,
+    record_dir: &Option<PathBuf>,
+) -> std::result::Result<(), DrainedSegment> {
+    let index = hold.next_segment;
+    let speech = segment.observed_speech_ms;
+    let request = SegmentRequest {
+        hold_id: hold.hold_id,
+        segment_index: index,
+        segment,
+        cache: Arc::clone(cache),
+        corrections: config.corrections.clone(),
+        record_dir: record_dir.clone(),
+    };
+    match tx.try_send(request) {
+        Ok(()) => {
+            hold.next_segment += 1;
+            hold.pending_segments += 1;
+            hold.observed_speech_ms += speech;
             Ok(())
         }
-        Err(e) => {
-            warn!("transcription failed: {e:#}");
-            Err("Transcription failed".into())
-        }
+        Err(TrySendError::Full(request)) => Err(request.segment),
+        Err(TrySendError::Disconnected(request)) => Err(request.segment),
     }
 }
 
@@ -1152,6 +1355,60 @@ mod single_instance {
 mod tests {
     use super::*;
 
+    struct RecordingInjector {
+        injected: Vec<String>,
+        mode: DeliveryMode,
+    }
+
+    impl RecordingInjector {
+        fn typed() -> Self {
+            Self {
+                injected: Vec::new(),
+                mode: DeliveryMode::Typed,
+            }
+        }
+
+        fn clipboard() -> Self {
+            Self {
+                injected: Vec::new(),
+                mode: DeliveryMode::Clipboard,
+            }
+        }
+    }
+
+    impl Injector for RecordingInjector {
+        fn inject(&mut self, text: &str) -> Result<()> {
+            self.injected.push(text.to_owned());
+            Ok(())
+        }
+
+        fn delivery_mode(&self) -> DeliveryMode {
+            self.mode
+        }
+
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+    }
+
+    fn hold_state() -> HoldState {
+        HoldState {
+            hold_id: 1,
+            clipboard_only: false,
+            next_segment: 0,
+            pending_segments: 0,
+            observed_speech_ms: 0,
+            deferred_text: Vec::new(),
+            accumulated_text: String::new(),
+            delivered_any: false,
+            clipboard_deferred: false,
+            delivery_failed: false,
+            released: false,
+            audio_error: false,
+            pending_drain: None,
+        }
+    }
+
     fn cfg() -> Config {
         Config::default()
     }
@@ -1168,6 +1425,42 @@ mod tests {
                 restart: false,
             }
         );
+    }
+
+    #[test]
+    fn typed_segments_are_incremental_and_joined_once() {
+        let mut hold = hold_state();
+        let mut typer = RecordingInjector::typed();
+        let mut clipper = RecordingInjector::clipboard();
+
+        deliver_text(&mut hold, "first phrase", &mut typer, &mut clipper);
+        deliver_text(&mut hold, "second phrase", &mut typer, &mut clipper);
+
+        assert_eq!(typer.injected, ["first phrase", " second phrase"]);
+        assert!(clipper.injected.is_empty());
+        assert_eq!(hold.accumulated_text, "first phrase second phrase");
+    }
+
+    #[test]
+    fn release_merge_keeps_all_captured_audio() {
+        let pending = DrainedSegment {
+            raw: vec![1.0, 2.0],
+            raw_rate: 16_000,
+            observed_speech_ms: 200,
+            reason: audio::DrainReason::Pause,
+        };
+        let tail = DrainedSegment {
+            raw: vec![3.0, 4.0],
+            raw_rate: 16_000,
+            observed_speech_ms: 100,
+            reason: audio::DrainReason::Release,
+        };
+
+        let merged = merge_release_segment(pending, tail);
+
+        assert_eq!(merged.raw, [1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(merged.observed_speech_ms, 300);
+        assert_eq!(merged.reason, audio::DrainReason::Release);
     }
 
     #[test]

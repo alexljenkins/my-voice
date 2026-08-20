@@ -22,6 +22,8 @@ pub struct Config {
     pub audio_device: String,
     pub min_speech_ms: u64,
     pub trailing_silence_ms: u64,
+    pub segment_pause_ms: u64,
+    pub segment_max_ms: u64,
     pub injection: String,
     /// Whole-word, case-insensitive find→replace pairs applied last in
     /// post-processing — fixes proper nouns/jargon the model never learns.
@@ -41,7 +43,9 @@ impl Default for Config {
             grab: true,
             audio_device: String::new(),
             min_speech_ms: 300,
-            trailing_silence_ms: 150,
+            trailing_silence_ms: 300,
+            segment_pause_ms: 300,
+            segment_max_ms: 30_000,
             injection: "auto".into(),
             corrections: Vec::new(),
         }
@@ -112,6 +116,8 @@ impl Config {
             "audio_device",
             "min_speech_ms",
             "trailing_silence_ms",
+            "segment_pause_ms",
+            "segment_max_ms",
             "injection",
             "corrections",
         ];
@@ -215,7 +221,9 @@ mod tests {
         assert_eq!(back.model, "moonshine-streaming-small");
         assert_eq!(back.load_timeout_secs, 1800);
         assert_eq!(back.min_speech_ms, 300);
-        assert_eq!(back.trailing_silence_ms, 150);
+        assert_eq!(back.trailing_silence_ms, 300);
+        assert_eq!(back.segment_pause_ms, 300);
+        assert_eq!(back.segment_max_ms, 30_000);
         assert!(back.quantized);
     }
 

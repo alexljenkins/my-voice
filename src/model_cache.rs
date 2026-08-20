@@ -106,16 +106,32 @@ impl ModelCache {
     /// run). Blocks on the same lock the preload holds, so there's no double
     /// load and no race. With `timeout_secs == 0` the model is dropped before
     /// returning — reload-every-use mode.
+    #[allow(dead_code)]
     pub fn transcribe(&self, audio: &[f32]) -> Result<String> {
+        self.transcribe_inner(audio, false)
+    }
+
+    pub fn transcribe_for_hold(&self, audio: &[f32]) -> Result<String> {
+        self.transcribe_inner(audio, true)
+    }
+
+    fn transcribe_inner(&self, audio: &[f32], keep_loaded: bool) -> Result<String> {
         let mut slot = self.lock_slot();
         load_locked(&mut slot, &self.factory)?;
         let text = slot.as_mut().unwrap().transcribe(audio)?;
         *self.lock_last_used() = Instant::now();
-        if self.timeout_secs == 0 {
+        if self.timeout_secs == 0 && !keep_loaded {
             *slot = None;
             debug!("model unloaded (load_timeout_secs = 0)");
         }
         Ok(text)
+    }
+
+    pub fn finish_hold(&self) {
+        if self.timeout_secs == 0 {
+            *self.lock_slot() = None;
+            debug!("model unloaded after segmented hold");
+        }
     }
 
     /// Spawn the background evictor. No-op for `timeout_secs <= 0`: negative
@@ -255,6 +271,27 @@ mod tests {
         cache.ensure_loaded().unwrap();
         cache.ensure_loaded().unwrap();
         assert_eq!(warms.load(Ordering::SeqCst), 1, "warm runs once per load");
+    }
+
+    #[test]
+    fn zero_timeout_keeps_one_model_for_each_segmented_hold() {
+        let builds = Arc::new(AtomicUsize::new(0));
+        let b = Arc::clone(&builds);
+        let cache = ModelCache::with_factory(
+            0,
+            Box::new(move || {
+                b.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(OkTranscriber) as Box<dyn Transcriber>)
+            }),
+        );
+
+        cache.transcribe_for_hold(&[0.0]).unwrap();
+        cache.transcribe_for_hold(&[0.0]).unwrap();
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+
+        cache.finish_hold();
+        cache.transcribe_for_hold(&[0.0]).unwrap();
+        assert_eq!(builds.load(Ordering::SeqCst), 2);
     }
 
     /// The default `warm()` routes through `transcribe`. Verify the trait

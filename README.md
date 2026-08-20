@@ -1,230 +1,197 @@
 # my-voice
 
-Hold **CapsLock**, speak, release — your words appear in whatever app is focused. No cloud, no subscription. Everything runs locally on your computer.
+Local push-to-talk dictation for Linux and macOS.
 
-## Requirements
+Hold **CapsLock** and talk. my-voice types each completed phrase into the app you are using. It keeps listening while it transcribes.
 
-- A working microphone
-- Linux or macOS
-- [Rust](https://rustup.rs) — the build tool (one install, then mostly forgotten)
+- Your voice stays on your computer.
+- Text appears when you pause. You do not need to release the key.
+- You can keep talking for as long as you need.
+- There is no account or subscription.
 
----
+## Get started
 
-## Install
+You need a microphone and [Rust](https://rustup.rs).
 
 ### Linux
 
-```sh
-# 1. Install Rust (skip if you already have it)
+```bash
+# Install the Linux build tools
+sudo apt install libasound2-dev pkg-config
+
+# Install Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source ~/.cargo/env
+source "$HOME/.cargo/env"
 
-# 2. Install my-voice
+# Install and start my-voice
 cargo install --git https://github.com/alexljenkins/my-voice
-
-# 3. Download the voice model (~345 MB default, one-time)
 my-voice --download
-
-# 4. Start
 my-voice
 ```
 
-A mic icon will appear in your system tray. Right-click it to change your microphone, model, and other settings.
+A microphone icon appears in the system tray. The default model download is about 345 MB.
 
-**New to Linux or hitting permission errors?** You may need to grant keyboard access first:
+<details>
+<summary>Complete the one-time Linux keyboard setup</summary>
 
-```sh
-sudo usermod -aG input $USER
+These commands let my-voice read CapsLock without changing its normal state.
+
+```bash
+sudo usermod -aG input "$USER"
 echo 'KERNEL=="uinput", GROUP="input", MODE="0660"' | sudo tee /etc/udev/rules.d/99-my-voice.rules
 sudo modprobe uinput
 ```
 
-Then **log out and back in**, and run `my-voice` again.
+Log out and back in after you run the commands.
 
-> Without this step, my-voice still works — but CapsLock will also toggle the caps-lock state as a side-effect.
+GNOME Wayland also needs `ydotool` to type directly into apps.
 
-<details>
-<summary>Linux — more details and troubleshooting</summary>
-
-### What the permissions do
-
-- `input` group — lets my-voice read keyboard events from `/dev/input`
-- `udev` rule — gives the group write access to the `uinput` virtual keyboard
-- `uinput` module — kernel module for creating virtual input devices (loaded automatically on most distros)
-
-To persist `uinput` across reboots, add it to your modules list:
-```sh
-echo 'uinput' | sudo tee -a /etc/modules-load.d/modules.conf
-```
-
-### Text doesn't appear (GNOME / Wayland)
-
-`wtype` doesn't work on GNOME Wayland. my-voice automatically falls back to **AT-SPI** (GNOME's accessibility bus), which is on by default and needs no setup.
-
-If AT-SPI is disabled or a specific app ignores it, install `ydotool`:
-
-```sh
+```bash
 sudo apt install ydotool
-ydotoold &   # start the daemon (add to autostart)
+ydotoold &
 ```
 
-Or switch to clipboard mode via the **Paste mode** submenu in the tray, then paste with Ctrl+V.
-
-### Keyboard unresponsive after a crash
-
-A hard `kill -9` can leave the keyboard grabbed. The kernel releases it automatically within a few seconds. If it stays stuck:
-
-```sh
-pkill my-voice
-```
-
-Or switch to a TTY with **Ctrl+Alt+F2** and run the command there.
-
-### Wrong microphone selected
-
-The tray **Microphone** submenu lists all detected input devices — click the one you want.
-
-Alternatively, run `my-voice --list-devices` to see device names and set `audio_device = "Headset"` (or any substring) in the config file.
-
-### Model not found
-
-```
-model file missing — run: my-voice --download
-```
-
-Run `my-voice --download` to fetch the configured model.
+You can use clipboard mode from the tray if direct typing is unavailable.
 
 </details>
-
----
 
 ### macOS
 
-```sh
-# 1. Install Rust (skip if you already have it)
+```bash
+# Install Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source ~/.cargo/env
+source "$HOME/.cargo/env"
 
-# 2. Install my-voice
+# Install and start my-voice
 cargo install --git https://github.com/alexljenkins/my-voice
-
-# 3. Download the voice model (~345 MB default, one-time)
 my-voice --download
-
-# 4. Start
 my-voice
 ```
 
-macOS will ask for two permissions — grant both:
-
-1. Open **System Settings → Privacy & Security → Input Monitoring** — find your terminal and enable it
-2. Open **System Settings → Privacy & Security → Accessibility** — find your terminal and enable it
-
-Then run `my-voice` again. Use **Ctrl+C** in the terminal to stop it.
-
-> **Note:** The macOS tray icon is not yet available. All settings are managed via the [config file](#configuration) for now.
+macOS asks for Input Monitoring and Accessibility access. Enable both permissions for your terminal.
 
 <details>
-<summary>macOS — more details and troubleshooting</summary>
+<summary>Find the macOS permissions</summary>
 
-### How the hotkey works on macOS
+1. Open **System Settings > Privacy & Security > Input Monitoring**.
+2. Enable access for your terminal.
+3. Open **System Settings > Privacy & Security > Accessibility**.
+4. Enable access for your terminal.
+5. Restart your terminal and run `my-voice` again.
 
-The daemon remaps CapsLock → F18 via `hidutil` while it's running. The original CapsLock behavior is restored when you quit. If the app crashes without a clean exit, restore it manually:
-
-```sh
-hidutil property --set '{"UserKeyMapping":[]}'
-```
-
-### Permissions not sticking
-
-If you granted permissions but the daemon still exits with an error, try:
-1. Quitting and reopening your terminal
-2. Removing and re-adding the permission entry in System Settings
-3. Running `my-voice` directly from `/usr/local/bin/my-voice` instead of through a shell wrapper
-
-### Wrong microphone
-
-Run `my-voice --list-devices` to see device names, then set `audio_device = "Headset"` (or any substring match) in the [config file](#configuration).
+macOS does not have the tray menu yet. Use the configuration file for settings.
 
 </details>
 
----
+## Use it
 
-## Usage
+1. Hold **CapsLock** and speak.
+2. Pause naturally. Each completed phrase appears while recording continues.
+3. Release **CapsLock**. The final phrase appears and recording stops.
 
-| Action | Result |
-|---|---|
-| Hold **CapsLock** → speak → release | Text typed into focused window |
-| Hold **Shift+CapsLock** → speak → release | Text copied to clipboard |
+Hold **Shift+CapsLock** to copy the full dictation to the clipboard instead.
 
-On Linux, right-click the tray icon to adjust model, microphone, paste mode, and startup settings — no config file needed.
+Long dictation has no total duration limit. my-voice uses pauses to split speech into smaller sections. Continuous speech also splits automatically.
 
-Run `my-voice --status` to check whether the daemon is running (and which model it's set to). Generate a shell completion script with `my-voice --completions <bash|zsh|fish|...>` (e.g. `my-voice --completions bash > /etc/bash_completion.d/my-voice`).
+## Settings and help
 
----
+Linux users can change the microphone, model, typing mode, and startup behavior from the tray menu.
 
 <details>
-<summary>Configuration file (optional)</summary>
+<summary>Configuration file</summary>
 
-Defaults work out of the box. To override, create `~/.config/my-voice/config.toml`:
+The default file is `~/.config/my-voice/config.toml`. You only need this file when the defaults do not fit.
 
 ```toml
-model = "moonshine-streaming-small"  # tiny | base | streaming-small | streaming-medium | /path/to/model
+model = "moonshine-streaming-small"
 model_dir = "~/.local/share/my-voice/models"
-quantized = true            # smaller, faster — negligible accuracy cost
-threads = 0                 # 0 = auto (up to 8)
-load_timeout_secs = 1800    # idle eviction; -1 = never unload, 0 = reload every use
-hotkey = "CapsLock"         # evdev key name (Linux); macOS only supports CapsLock in v1
-clipboard_hotkey = true     # Shift+hotkey → clipboard
-grab = true                 # Linux: exclusive grab + virtual keyboard passthrough
-audio_device = ""           # substring match against device name; "" = system default
-min_speech_ms = 300         # discard holds shorter than this (prevents accidental triggers)
-trailing_silence_ms = 150   # extra audio captured after release (catches word endings)
-injection = "auto"          # auto | wtype | xdotool | ydotool | atspi | clipboard
-corrections = []            # whole-word, case-insensitive fixes, e.g.
-                            # [["git hub", "GitHub"], ["my voice", "my-voice"]]
+quantized = true
+threads = 0
+load_timeout_secs = 1800
+hotkey = "CapsLock"
+clipboard_hotkey = true
+grab = true
+audio_device = ""
+min_speech_ms = 300
+trailing_silence_ms = 300
+segment_pause_ms = 300
+segment_max_ms = 30000
+injection = "auto"
+corrections = []
 ```
 
-Unknown keys are warned and ignored.
+Run with another file when you want separate settings.
 
-Run `my-voice --config /path/to/file.toml` to use an alternate config file.
+```bash
+my-voice --config /path/to/config.toml
+```
 
 </details>
 
 <details>
 <summary>Models</summary>
 
-| Model | Size (quantized) | Speed | Best for |
-|---|---|---|---|
-| `moonshine-tiny` | ~31 MB | ~10× real-time | Clear speech, weak CPUs |
-| `moonshine-base` | ~64 MB | ~4× real-time | Small download, decent accuracy |
-| `moonshine-streaming-small` | ~345 MB | ~15× real-time | **Default**; best accuracy-per-MB |
-| `moonshine-streaming-medium` | ~566 MB | ~12× real-time | Best accuracy |
+The default model is the best balance for most computers.
 
-Every model is Moonshine (ONNX, English-only). The `streaming-*` variants are
-run as a single push-to-talk pass over the whole utterance, not chunk-by-chunk.
+| Model | Download | Use it when |
+|---|---:|---|
+| `moonshine-tiny` | 31 MB | The computer has little memory |
+| `moonshine-base` | 64 MB | You want a small download |
+| `moonshine-streaming-small` | 345 MB | You want the recommended model |
+| `moonshine-streaming-medium` | 566 MB | You want the best accuracy |
 
-Switch models from the **Model** submenu in the tray (Linux), or by editing `model` in the config file. Run `my-voice --download` after changing the model.
-
-Models are downloaded from HuggingFace and cached in `~/.local/share/my-voice/models/`.
+All models run locally and support English only.
 
 </details>
 
 <details>
 <summary>Troubleshooting</summary>
 
-**Model not found**
-```
-model file missing — run: my-voice --download
-```
-Run `my-voice --download`.
+### Text does not appear
 
-**Keyboard disconnected and reconnected**
-Restart the daemon. Hotplug detection isn't supported in v1.
+Open the tray menu and switch to clipboard mode. On GNOME Wayland, install and start `ydotool`.
 
-**Verify your microphone works**
-```sh
-my-voice --test   # records 3 seconds and prints the transcription
+### The wrong microphone is active
+
+Choose another microphone from the tray menu. You can also list device names.
+
+```bash
+my-voice --list-devices
+```
+
+### The model is missing
+
+```bash
+my-voice --download
+```
+
+### The microphone does not work
+
+Build the diagnostic commands, then record a 3-second test.
+
+```bash
+cargo install --git https://github.com/alexljenkins/my-voice --features debug-tools
+my-voice --test
+```
+
+### The keyboard stops responding after a crash
+
+```bash
+pkill my-voice
+```
+
+The kernel normally releases the keyboard within a few seconds.
+
+</details>
+
+<details>
+<summary>Command line tools</summary>
+
+```bash
+my-voice --status
+my-voice --list-devices
+my-voice --download
+my-voice --completions bash
 ```
 
 </details>
@@ -232,13 +199,13 @@ my-voice --test   # records 3 seconds and prints the transcription
 <details>
 <summary>Development</summary>
 
-```sh
-cargo test                          # unit tests (no audio, model, or network needed)
-cargo clippy -- -D warnings         # lint
-cargo fmt                           # format
-cargo build --features debug-tools  # enable --test/--wav/--record diagnostics
+```bash
+cargo test
+cargo clippy -- -D warnings
+cargo fmt
+cargo build --features debug-tools
 ```
 
-Tests cover: resample math, config round-trip, quote normalization, key-name parsing, max-token clamping, injection chain selection.
+The debug build adds `--test`, `--wav`, and `--record` diagnostics.
 
 </details>
