@@ -184,7 +184,7 @@ impl Injector for XdotoolInjector {
 }
 
 fn ydotool_type_args(text: &str) -> [&str; 5] {
-    ["type", "--key-delay=1", "--key-hold=1", "--", text]
+    ["type", "--key-delay=2", "--key-hold=2", "--", text]
 }
 
 fn xdotool_type_args(text: &str) -> [&str; 6] {
@@ -485,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn external_typers_use_one_millisecond_delay() {
+    fn external_typers_use_fast_reliable_delays() {
         assert_eq!(wtype_type_args("hello"), ["-d", "1", "--", "hello"]);
         assert_eq!(
             xdotool_type_args("hello"),
@@ -493,7 +493,7 @@ mod tests {
         );
         assert_eq!(
             ydotool_type_args("hello"),
-            ["type", "--key-delay=1", "--key-hold=1", "--", "hello"]
+            ["type", "--key-delay=2", "--key-hold=2", "--", "hello"]
         );
     }
 }
