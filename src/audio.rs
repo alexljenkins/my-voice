@@ -73,6 +73,12 @@ pub struct DrainedSegment {
     pub reason: DrainReason,
 }
 
+#[cfg(feature = "debug-tools")]
+pub struct TimedSegment {
+    pub segment: DrainedSegment,
+    pub boundary_sample: usize,
+}
+
 pub struct AudioRecorder {
     device: cpal::Device,
     sample_format: SampleFormat,
@@ -303,18 +309,13 @@ impl AudioRecorder {
 
     fn update_detector(&mut self) {
         let b = lock_buf(&self.buffer);
-        let window = (self.sample_rate as u64 * RAW_WINDOW_MS / 1000) as usize;
-        while self.detector_pos + window <= b.len() {
-            let w = &b[self.detector_pos..self.detector_pos + window];
-            let rms = (w.iter().map(|s| s * s).sum::<f32>() / w.len() as f32).sqrt();
-            if rms >= RAW_SPEECH_RMS {
-                self.observed_speech_ms += RAW_WINDOW_MS;
-                self.trailing_silence_ms = 0;
-            } else if self.observed_speech_ms > 0 {
-                self.trailing_silence_ms += RAW_WINDOW_MS;
-            }
-            self.detector_pos += window;
-        }
+        update_segment_detector(
+            &b,
+            self.sample_rate,
+            &mut self.detector_pos,
+            &mut self.observed_speech_ms,
+            &mut self.trailing_silence_ms,
+        );
     }
 
     fn reset_detector(&mut self) {
@@ -327,6 +328,95 @@ impl AudioRecorder {
     pub fn target_rate(&self) -> u32 {
         TARGET_RATE
     }
+}
+
+fn update_segment_detector(
+    samples: &[f32],
+    sample_rate: u32,
+    detector_pos: &mut usize,
+    observed_speech_ms: &mut u64,
+    trailing_silence_ms: &mut u64,
+) {
+    let window = (sample_rate as u64 * RAW_WINDOW_MS / 1000) as usize;
+    while *detector_pos + window <= samples.len() {
+        let w = &samples[*detector_pos..*detector_pos + window];
+        let rms = (w.iter().map(|s| s * s).sum::<f32>() / w.len() as f32).sqrt();
+        if rms >= RAW_SPEECH_RMS {
+            *observed_speech_ms += RAW_WINDOW_MS;
+            *trailing_silence_ms = 0;
+        } else if *observed_speech_ms > 0 {
+            *trailing_silence_ms += RAW_WINDOW_MS;
+        }
+        *detector_pos += window;
+    }
+}
+
+/// Split fixed audio at the same 200 ms poll points as the daemon.
+/// The detector uses sample counts because a WAV file has no wall clock.
+#[cfg(feature = "debug-tools")]
+pub fn segment_samples(
+    samples: &[f32],
+    sample_rate: u32,
+    pause_ms: u64,
+    max_ms: u64,
+) -> Vec<TimedSegment> {
+    const POLL_MS: usize = 200;
+
+    let poll_samples = sample_rate as usize * POLL_MS / 1000;
+    let mut segments = Vec::new();
+    let mut buffer = Vec::new();
+    let mut detector_pos = 0;
+    let mut observed_speech_ms = 0;
+    let mut trailing_silence_ms = 0;
+    let mut consumed = 0;
+
+    for chunk in samples.chunks(poll_samples.max(1)) {
+        buffer.extend_from_slice(chunk);
+        consumed += chunk.len();
+        update_segment_detector(
+            &buffer,
+            sample_rate,
+            &mut detector_pos,
+            &mut observed_speech_ms,
+            &mut trailing_silence_ms,
+        );
+        let duration_ms = buffer.len() as u64 * 1000 / sample_rate as u64;
+        let Some(reason) = segment_drain_reason(
+            duration_ms,
+            observed_speech_ms,
+            trailing_silence_ms,
+            pause_ms,
+            max_ms,
+            false,
+        ) else {
+            continue;
+        };
+
+        let segment = DrainedSegment {
+            raw: std::mem::take(&mut buffer),
+            raw_rate: sample_rate,
+            observed_speech_ms,
+            reason,
+        };
+        detector_pos = 0;
+        observed_speech_ms = 0;
+        trailing_silence_ms = 0;
+        segments.push(TimedSegment {
+            segment,
+            boundary_sample: consumed,
+        });
+    }
+
+    segments.push(TimedSegment {
+        segment: DrainedSegment {
+            raw: buffer,
+            raw_rate: sample_rate,
+            observed_speech_ms,
+            reason: DrainReason::Release,
+        },
+        boundary_sample: samples.len(),
+    });
+    segments
 }
 
 /// §8b: prefer 16 kHz native capture; falls back to the device default if unsupported.
@@ -746,6 +836,8 @@ fn card_friendly_names() -> std::collections::HashMap<String, String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "debug-tools")]
+    use super::segment_samples;
     use super::{
         adaptive_pause_ms, append_mono, apply_audio_processing, card_id, force_split_ms,
         format_rank, high_level_label, lock_buf, resample, segment_drain_reason, DrainReason,
@@ -843,6 +935,22 @@ mod tests {
             segment_drain_reason(48_000, 0, 48_000, 300, 30_000, false),
             Some(DrainReason::MaxDuration)
         );
+    }
+
+    #[cfg(feature = "debug-tools")]
+    #[test]
+    fn wav_segmentation_polls_at_two_hundred_millisecond_boundaries() {
+        let mut samples = vec![0.02; 6_400];
+        samples.extend(vec![0.0; 6_400]);
+        samples.extend(vec![0.02; 3_200]);
+
+        let segments = segment_samples(&samples, 16_000, 300, 30_000);
+
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].boundary_sample, 12_800);
+        assert_eq!(segments[0].segment.reason, DrainReason::Pause);
+        assert_eq!(segments[1].boundary_sample, 16_000);
+        assert_eq!(segments[1].segment.reason, DrainReason::Release);
     }
 
     #[test]

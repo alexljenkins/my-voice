@@ -53,6 +53,11 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     wav: Option<PathBuf>,
 
+    /// With --wav: use the daemon's 200 ms segmentation cadence.
+    #[cfg(feature = "debug-tools")]
+    #[arg(long, requires = "wav")]
+    segmented: bool,
+
     /// With --wav: transcribe N times warm (model loaded+warmed once) and log
     /// per-iteration encode/decode + peak RSS. For the perf bench, not the gate.
     #[cfg(feature = "debug-tools")]
@@ -163,7 +168,7 @@ fn run(cli: Cli) -> Result<()> {
 
     #[cfg(feature = "debug-tools")]
     if let Some(path) = cli.wav.as_deref() {
-        return run_wav(&config, path, cli.bench_iters.max(1));
+        return run_wav(&config, path, cli.bench_iters.max(1), cli.segmented);
     }
 
     run_daemon(config, cli.config, cli.record)
@@ -236,7 +241,7 @@ fn run_set_hotkey(config_path: Option<&Path>) -> Result<()> {
 /// Feed a wav file straight through the transcriber — isolates the inference
 /// path from the mic/capture path. Resamples to 16 kHz mono if needed.
 #[cfg(feature = "debug-tools")]
-fn run_wav(config: &Config, path: &std::path::Path, iters: usize) -> Result<()> {
+fn run_wav(config: &Config, path: &std::path::Path, iters: usize, segmented: bool) -> Result<()> {
     let mut reader = hound::WavReader::open(path).with_context(|| format!("opening {path:?}"))?;
     let spec = reader.spec();
     let ch = spec.channels.max(1) as usize;
@@ -257,20 +262,68 @@ fn run_wav(config: &Config, path: &std::path::Path, iters: usize) -> Result<()> 
         .collect();
     let resampled = audio::resample(&mono, spec.sample_rate, 16_000);
     let raw_peak = resampled.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
-    let samples = audio::process_capture(&resampled, 16_000);
+    let samples = (!segmented).then(|| audio::process_capture(&resampled, 16_000));
     info!(
         "wav: {:.2}s, {} Hz → 16 kHz, {ch} ch → mono, raw peak {raw_peak:.3}, processed {:.2}s",
         mono.len() as f32 / spec.sample_rate as f32,
         spec.sample_rate,
-        samples.len() as f32 / 16_000.0
+        samples.as_ref().map_or(resampled.len(), Vec::len) as f32 / 16_000.0
     );
     // create() loads + warms the model once, so every pass below is warm. The
     // first pass produces the text we print; extra passes (--bench-iters > 1)
     // only re-time the warm steady state, which is what a daemon user feels.
     let mut transcriber = transcriber::create(config)?;
     let mut text = String::new();
-    for _ in 0..iters {
-        text = post_process(&transcriber.transcribe(&samples)?, &config.corrections);
+    if segmented {
+        let segments = audio::segment_samples(
+            &mono,
+            spec.sample_rate,
+            config.segment_pause_ms,
+            config.segment_max_ms,
+        );
+        for (index, timed) in segments.iter().enumerate() {
+            info!(
+                segment_index = index,
+                boundary_seconds = format_args!(
+                    "{:.3}",
+                    timed.boundary_sample as f64 / spec.sample_rate as f64
+                ),
+                reason = ?timed.segment.reason,
+                "segment boundary"
+            );
+        }
+        let observed_speech_ms = segments
+            .iter()
+            .map(|timed| timed.segment.observed_speech_ms)
+            .sum::<u64>();
+        for _ in 0..iters {
+            text.clear();
+            for timed in &segments {
+                let processed = audio::process_capture(
+                    &audio::resample(&timed.segment.raw, timed.segment.raw_rate, 16_000),
+                    16_000,
+                );
+                let peak = processed.iter().fold(0.0f32, |a, b| a.max(b.abs()));
+                if timed.segment.observed_speech_ms == 0 || peak < 0.01 {
+                    continue;
+                }
+                let segment_text =
+                    post_process(&transcriber.transcribe(&processed)?, &config.corrections);
+                if !segment_text.is_empty() {
+                    append_joined(&mut text, &segment_text);
+                }
+            }
+        }
+        if observed_speech_ms < config.min_speech_ms {
+            text.clear();
+        }
+    } else {
+        let samples = samples
+            .as_deref()
+            .expect("single-pass samples are processed");
+        for _ in 0..iters {
+            text = post_process(&transcriber.transcribe(samples)?, &config.corrections);
+        }
     }
     if let Some(kb) = peak_rss_kb() {
         info!("peak RSS {kb} kB");
@@ -364,27 +417,35 @@ fn spawn_transcription_worker(tx: mpsc::Sender<DaemonMsg>) -> SyncSender<Segment
                 record_dir,
             } = request;
             debug!(?segment.reason, hold_id, segment_index, "processing audio segment");
+            if segment.observed_speech_ms == 0 {
+                let _ = tx.send(DaemonMsg::SegmentComplete(SegmentResult {
+                    hold_id,
+                    segment_index,
+                    text: Ok(None),
+                }));
+                continue;
+            }
             let processed = audio::process_capture(
                 &audio::resample(&segment.raw, segment.raw_rate, 16_000),
                 16_000,
             );
-            if let Some(dir) = record_dir {
-                let stem = format!("{hold_id}_{segment_index:04}");
-                let _ = write_wav(
-                    &segment.raw,
-                    segment.raw_rate,
-                    &dir.join(format!("{stem}_raw.wav")).to_string_lossy(),
-                );
-                let _ = write_wav(
-                    &processed,
-                    16_000,
-                    &dir.join(format!("{stem}.wav")).to_string_lossy(),
-                );
-            }
             let peak = processed.iter().fold(0.0f32, |a, b| a.max(b.abs()));
-            let text = if segment.observed_speech_ms == 0 || peak < 0.01 {
+            let text = if peak < 0.01 {
                 Ok(None)
             } else {
+                if let Some(dir) = record_dir {
+                    let stem = format!("{hold_id}_{segment_index:04}");
+                    let _ = write_wav(
+                        &segment.raw,
+                        segment.raw_rate,
+                        &dir.join(format!("{stem}_raw.wav")).to_string_lossy(),
+                    );
+                    let _ = write_wav(
+                        &processed,
+                        16_000,
+                        &dir.join(format!("{stem}.wav")).to_string_lossy(),
+                    );
+                }
                 cache
                     .transcribe_for_hold(&processed)
                     .map(|raw| post_process(&raw, &corrections))
@@ -1439,6 +1500,45 @@ mod tests {
         assert_eq!(typer.injected, ["first phrase", " second phrase"]);
         assert!(clipper.injected.is_empty());
         assert_eq!(hold.accumulated_text, "first phrase second phrase");
+    }
+
+    #[test]
+    fn silent_release_segment_is_not_processed_or_saved() {
+        let dir =
+            std::env::temp_dir().join(format!("my-voice-silent-segment-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = Config::default();
+        let cache = ModelCache::new(&config);
+        let (daemon_tx, daemon_rx) = mpsc::channel();
+        let segment_tx = spawn_transcription_worker(daemon_tx);
+
+        segment_tx
+            .send(SegmentRequest {
+                hold_id: 7,
+                segment_index: 1,
+                segment: DrainedSegment {
+                    raw: vec![0.0; 3_200],
+                    raw_rate: 16_000,
+                    observed_speech_ms: 0,
+                    reason: audio::DrainReason::Release,
+                },
+                cache,
+                corrections: Vec::new(),
+                record_dir: Some(dir.clone()),
+            })
+            .unwrap();
+
+        let DaemonMsg::SegmentComplete(result) = daemon_rx.recv().unwrap() else {
+            panic!("expected segment completion");
+        };
+        assert_eq!(result.hold_id, 7);
+        assert_eq!(result.segment_index, 1);
+        assert!(matches!(result.text, Ok(None)));
+        assert!(!dir.join("7_0001_raw.wav").exists());
+        assert!(!dir.join("7_0001.wav").exists());
+
+        drop(segment_tx);
+        std::fs::remove_dir(&dir).unwrap();
     }
 
     #[test]

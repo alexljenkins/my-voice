@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 # The standard validator: per-sample accuracy (WER) + warm perf (time/mem/CPU)
-# for every model, in ONE inference pass per sample. Run it before and after an
+# for every model, with single-pass and segmented accuracy per sample. Run it before and after an
 # optimization and diff the tables to check for regressions. See ../TIMING.md.
 #
-# Single pass: each sample is transcribed once (the model is loaded+warmed once,
-# then --bench-iters re-times the warm steady state). That same run yields BOTH
+# The timed run transcribes each sample once (the model is loaded+warmed once,
+# then --bench-iters re-times the warm steady state). That run yields BOTH
 # the text — printed to stdout → WER vs samples/expected.txt — and the timings —
 # logged to stderr → enc/dec/RTF/RSS, plus whole-process CPU% from GNU time. No
-# separate accuracy run, so no model is transcribed twice.
+# Segmented accuracy runs separately because each CLI process owns one model.
 #
 # Output (terminal + $RESULTS): a per-model table (one row per sample, then an
 # AGGREGATE row) and a final cross-model SUMMARY table. $RESULTS is overwritten.
 #
 # Usage:   ./tools/bench-wer.sh
 # Env:     ITERS=5  CORES=1-6  QUIET=0.5  QUIET_TIMEOUT=30  RESULTS=tools/zz_results.txt
-#          MODELS="m1 m2 ..."   MODEL=<one>   SKIP_GOVERNOR=1
+#          MODELS="m1 m2 ..."   MODEL=<one>   SAMPLES=<dir>   SKIP_GOVERNOR=1
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -24,11 +24,11 @@ CORES="${CORES:-1-6}"
 QUIET="${QUIET:-0.5}"                   # start only once 1-min loadavg is below this
 QUIET_TIMEOUT="${QUIET_TIMEOUT:-30}"    # ...or give up waiting after this many seconds
 RESULTS="${RESULTS:-tools/zz_results.txt}"
-MODELS="${MODELS:-moonshine-base moonshine-streaming-small moonshine-streaming-medium}"
+MODELS="${MODELS:-moonshine-base:int8 moonshine-base:fp32 moonshine-streaming-small:int8}"
 [[ -n "${MODEL:-}" ]] && MODELS="$MODEL"   # MODEL=<one> overrides the whole list
 
 BIN=./target/release/my-voice
-SAMPLES=samples
+SAMPLES="${SAMPLES:-samples}"
 EXPECTED="$SAMPLES/expected.txt"
 
 [[ -x "$BIN" ]] || { echo "build first: cargo build --release --features debug-tools" >&2; exit 1; }
@@ -50,9 +50,9 @@ if [[ -z "${SKIP_GOVERNOR:-}" && "$orig_gov" != "performance" && "$orig_gov" != 
     fi
 fi
 
-cfg="$(mktemp --suffix=.toml)"; tf="$(mktemp)"; errf="$(mktemp)"
+cfg="$(mktemp --suffix=.toml)"; tf="$(mktemp)"; errf="$(mktemp)"; segerrf="$(mktemp)"
 cleanup() {
-    rm -f "$cfg" "$tf" "$errf"
+    rm -f "$cfg" "$tf" "$errf" "$segerrf"
     [[ -n "${restore_gov:-}" ]] && sudo cpupower frequency-set -g "$orig_gov" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -123,23 +123,36 @@ wer_calc() {
 say()  { printf '%s\n' "$*" | tee -a "$RESULTS"; }
 sayf() { printf "$@" | tee -a "$RESULTS"; }
 
-ROW_H="  %-22s %7s %7s %7s %6s %6s %5s %6s %6s\n"
-ROW_F="  %-22s %6.1fs %5dms %5dms %6.3f %4dMB %4d%% %6.3f %6.3f\n"
+ROW_H="  %-22s %7s %7s %7s %6s %6s %5s %6s %6s %7s %9s\n"
+ROW_F="  %-22s %6.1fs %5dms %5dms %6.3f %4dMB %4d%% %6.3f %6.3f %7.3f %9.3f\n"
 
 # ── run ──────────────────────────────────────────────────────────────────────
 : > "$RESULTS"
 say "bench-wer  $(date '+%Y-%m-%d %H:%M:%S')  iters=$ITERS  cores=$CORES ${PIN:+(pinned)}  gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo ?)"
 
-s_name=(); s_rss=(); s_encdec=(); s_rtf=(); s_wer=(); s_strict=()
+s_name=(); s_rss=(); s_encdec=(); s_rtf=(); s_wer=(); s_strict=(); s_seg_wer=(); s_seg_strict=()
 
-for model in $MODELS; do
-    printf 'model = "%s"\n' "$model" > "$cfg"
+for variant in $MODELS; do
+    if [[ "$variant" == *:* ]]; then
+        model="${variant%:*}"
+        precision="${variant##*:}"
+    else
+        model="$variant"
+        precision=int8
+    fi
+    case "$precision" in
+        int8) quantized=true ;;
+        fp32) quantized=false ;;
+        *) echo "unknown precision '$precision' in MODELS entry '$variant'" >&2; exit 1 ;;
+    esac
+    printf 'model = "%s"\nquantized = %s\n' "$model" "$quantized" > "$cfg"
+    label="$model $precision"
     say ""
-    say "── $model ──"
-    sayf "$ROW_H" sample audio enc dec RTF RSS CPU WER strict
+    say "── $label ──"
+    sayf "$ROW_H" sample audio enc dec RTF RSS CPU WER strict segWER segStrict
 
     sum_enc=0; sum_dec=0; total_audio=0; max_rss=0; max_cpu=0
-    tne=0; trn=0; tse=0; trs=0
+    tne=0; trn=0; tse=0; trs=0; stne=0; strn=0; stse=0; strs=0
 
     while IFS= read -r line; do
         line="${line#"${line%%[![:space:]]*}"}"              # ltrim
@@ -151,6 +164,8 @@ for model in $MODELS; do
 
         # One run: stdout → hypothesis text; stderr → timings/RSS; $tf → CPU%.
         hyp="$("${TIME[@]}" "${PIN[@]}" "$BIN" -v --config "$cfg" --bench-iters "$ITERS" --wav "$wav" 2>"$errf")"
+        seg_hyp="$("${PIN[@]}" "$BIN" -v --config "$cfg" --wav "$wav" --segmented 2>"$segerrf")"
+        grep 'segment boundary' "$segerrf" >&2 || true
         mapfile -t encs < <(grep -oE 'encode [0-9]+' "$errf" | grep -oE '[0-9]+')
         mapfile -t decs < <(grep -oE 'decode [0-9]+' "$errf" | grep -oE '[0-9]+')
         if [[ ${#encs[@]} -eq 0 ]]; then
@@ -162,37 +177,42 @@ for model in $MODELS; do
 
         me="$(min "${encs[@]}")"; md="$(min "${decs[@]}")"
         read -r ne rn se rs wer strict < <(wer_calc "$ref" "$hyp")
+        read -r sne srn sse srs seg_wer seg_strict < <(wer_calc "$ref" "$seg_hyp")
 
         sum_enc=$(( sum_enc + me )); sum_dec=$(( sum_dec + md ))
         (( rss > max_rss )) && max_rss="$rss"
         (( ${cpu:-0} > max_cpu )) && max_cpu="${cpu:-0}"
         tne=$(( tne + ne )); trn=$(( trn + rn )); tse=$(( tse + se )); trs=$(( trs + rs ))
+        stne=$(( stne + sne )); strn=$(( strn + srn )); stse=$(( stse + sse )); strs=$(( strs + srs ))
         total_audio="$(awk "BEGIN{printf \"%.2f\", $total_audio+$audio}")"
         rtf="$(awk "BEGIN{printf \"%.3f\", ($me+$md)/1000/($audio>0?$audio:0.001)}")"
         mb="$(awk "BEGIN{printf \"%.0f\", $rss/1024}")"
 
-        sayf "$ROW_F" "$file" "$audio" "$me" "$md" "$rtf" "$mb" "${cpu:-0}" "$wer" "$strict"
+        sayf "$ROW_F" "$file" "$audio" "$me" "$md" "$rtf" "$mb" "${cpu:-0}" "$wer" "$strict" "$seg_wer" "$seg_strict"
     done < "$EXPECTED"
 
     agg_rtf="$(awk "BEGIN{printf \"%.3f\", ($sum_enc+$sum_dec)/1000/($total_audio>0?$total_audio:0.001)}")"
     agg_wer="$(awk "BEGIN{printf \"%.3f\", $tne/($trn>0?$trn:1)}")"
     agg_strict="$(awk "BEGIN{printf \"%.3f\", $tse/($trs>0?$trs:1)}")"
+    agg_seg_wer="$(awk "BEGIN{printf \"%.3f\", $stne/($strn>0?$strn:1)}")"
+    agg_seg_strict="$(awk "BEGIN{printf \"%.3f\", $stse/($strs>0?$strs:1)}")"
     mb="$(awk "BEGIN{printf \"%.0f\", $max_rss/1024}")"
     say "  ----------------------------------------------------------------------------"
-    sayf "$ROW_F" "AGGREGATE" "$total_audio" "$sum_enc" "$sum_dec" "$agg_rtf" "$mb" "$max_cpu" "$agg_wer" "$agg_strict"
+    sayf "$ROW_F" "AGGREGATE" "$total_audio" "$sum_enc" "$sum_dec" "$agg_rtf" "$mb" "$max_cpu" "$agg_wer" "$agg_strict" "$agg_seg_wer" "$agg_seg_strict"
 
-    s_name+=("$model"); s_rss+=("$mb"); s_encdec+=("$(( sum_enc + sum_dec ))")
+    s_name+=("$label"); s_rss+=("$mb"); s_encdec+=("$(( sum_enc + sum_dec ))")
     s_rtf+=("$agg_rtf"); s_wer+=("$agg_wer"); s_strict+=("$agg_strict")
+    s_seg_wer+=("$agg_seg_wer"); s_seg_strict+=("$agg_seg_strict")
 done
 
 # ── cross-model summary ──────────────────────────────────────────────────────
 say ""
 say "── SUMMARY (peak RSS, total enc+dec, aggregate RTF/WER) ──"
-sayf "  %-26s %6s %9s %7s %7s %7s %7s\n" model RSS enc+dec RTF xRT WER strict
+sayf "  %-32s %6s %9s %7s %7s %7s %7s %7s %9s\n" model RSS enc+dec RTF xRT WER strict segWER segStrict
 for i in "${!s_name[@]}"; do
     xrt="$(awk "BEGIN{printf \"%.1f\", 1/(${s_rtf[$i]}>0?${s_rtf[$i]}:0.001)}")"
-    sayf "  %-26s %4dMB %7dms %7.3f %6.1fx %7.3f %7.3f\n" \
-        "${s_name[$i]}" "${s_rss[$i]}" "${s_encdec[$i]}" "${s_rtf[$i]}" "$xrt" "${s_wer[$i]}" "${s_strict[$i]}"
+    sayf "  %-32s %4dMB %7dms %7.3f %6.1fx %7.3f %7.3f %7.3f %9.3f\n" \
+        "${s_name[$i]}" "${s_rss[$i]}" "${s_encdec[$i]}" "${s_rtf[$i]}" "$xrt" "${s_wer[$i]}" "${s_strict[$i]}" "${s_seg_wer[$i]}" "${s_seg_strict[$i]}"
 done
 say ""
 say "wrote $RESULTS"

@@ -1,0 +1,39 @@
+bench-wer  2026-09-03 09:29:39  iters=1  cores=1-6 (pinned)  gov=powersave
+
+── moonshine-base int8 ──
+  sample                   audio     enc     dec    RTF    RSS   CPU    WER strict  segWER segStrict
+  1_0000_raw.wav            6.7s    48ms   222ms  0.040  270MB  150%  0.000  0.000   0.000     0.000
+  1_0003_raw.wav            0.6s     5ms    28ms  0.058  248MB  109%  0.000  1.000   0.000     1.000
+  2_0000_raw.wav            2.9s    21ms   127ms  0.050  259MB  138%  0.000  0.111   0.000     0.111
+  2_0001_raw.wav            1.6s    11ms    57ms  0.043  254MB  119%  0.000  0.000   0.000     0.000
+  2_0002_raw.wav            0.6s     5ms    29ms  0.057  252MB  110%  1.000  1.000   1.000     1.000
+  ----------------------------------------------------------------------------
+  AGGREGATE                12.4s    90ms   463ms  0.045  270MB  150%  0.034  0.103   0.034     0.103
+
+── moonshine-base fp32 ──
+  sample                   audio     enc     dec    RTF    RSS   CPU    WER strict  segWER segStrict
+  1_0000_raw.wav            6.7s    52ms   169ms  0.033  635MB  127%  0.000  0.000   0.000     0.000
+  1_0003_raw.wav            0.6s     7ms    22ms  0.051  637MB  104%  0.000  1.000   0.000     1.000
+  2_0000_raw.wav            2.9s    21ms    96ms  0.040  634MB  119%  0.000  0.000   0.000     0.000
+  2_0001_raw.wav            1.6s    13ms    48ms  0.039  636MB  110%  0.000  0.250   0.000     0.250
+  2_0002_raw.wav            0.6s     6ms    38ms  0.073  632MB  107%  0.000  1.000   1.000     1.000
+  ----------------------------------------------------------------------------
+  AGGREGATE                12.4s    99ms   373ms  0.038  637MB  127%  0.000  0.103   0.034     0.103
+
+── moonshine-streaming-small int8 ──
+  sample                   audio     enc     dec    RTF    RSS   CPU    WER strict  segWER segStrict
+  1_0000_raw.wav            6.7s    95ms   137ms  0.035  386MB  136%  0.000  0.071   0.000     0.071
+  1_0003_raw.wav            0.6s     9ms    13ms  0.039  366MB  104%  0.000  1.000   0.000     1.000
+  2_0000_raw.wav            2.9s    39ms    72ms  0.038  368MB  121%  0.000  0.000   0.000     0.000
+  2_0001_raw.wav            1.6s    21ms    33ms  0.034  367MB  111%  0.000  0.250   0.000     0.250
+  2_0002_raw.wav            0.6s    10ms    15ms  0.042  367MB  104%  0.000  1.000   1.000     1.000
+  ----------------------------------------------------------------------------
+  AGGREGATE                12.4s   174ms   270ms  0.036  386MB  136%  0.000  0.138   0.034     0.138
+
+── SUMMARY (peak RSS, total enc+dec, aggregate RTF/WER) ──
+  model                               RSS   enc+dec     RTF     xRT     WER  strict  segWER segStrict
+  moonshine-base int8               270MB     553ms   0.045   22.2x   0.034   0.103   0.034     0.103
+  moonshine-base fp32               637MB     472ms   0.038   26.3x   0.000   0.103   0.034     0.103
+  moonshine-streaming-small int8    386MB     444ms   0.036   27.8x   0.000   0.138   0.034     0.138
+
+wrote tools/personal_results.txt

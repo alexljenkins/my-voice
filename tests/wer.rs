@@ -14,6 +14,7 @@
 //!
 //! Env knobs:
 //! * `MY_VOICE_WER_MODEL` — model name to test (default: moonshine-base)
+//! * `MY_VOICE_WER_QUANTIZED` — use the int8 model files (default: true)
 //! * `MY_VOICE_WER_MAX`   — max aggregate WER before failure (default: 0.25)
 #![cfg(feature = "debug-tools")]
 
@@ -78,6 +79,10 @@ fn parse_timings(stderr: &str) -> Option<(u64, u64)> {
 fn samples_wer() {
     let model =
         std::env::var("MY_VOICE_WER_MODEL").unwrap_or_else(|_| "moonshine-base".to_string());
+    let quantized: bool = std::env::var("MY_VOICE_WER_QUANTIZED")
+        .unwrap_or_else(|_| "true".to_string())
+        .parse()
+        .expect("MY_VOICE_WER_QUANTIZED must be true or false");
     let max_wer: f64 = std::env::var("MY_VOICE_WER_MAX")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -89,12 +94,20 @@ fn samples_wer() {
 
     let config_path =
         std::env::temp_dir().join(format!("my-voice-wer-{}.toml", std::process::id()));
-    std::fs::write(&config_path, format!("model = \"{model}\"\n")).unwrap();
+    std::fs::write(
+        &config_path,
+        format!("model = \"{model}\"\nquantized = {quantized}\n"),
+    )
+    .unwrap();
 
     let mut total_words = 0usize;
     let mut total_errors = 0usize;
     let mut strict_words = 0usize;
     let mut strict_errors = 0usize;
+    let mut segmented_words = 0usize;
+    let mut segmented_errors = 0usize;
+    let mut segmented_strict_words = 0usize;
+    let mut segmented_strict_errors = 0usize;
     let mut total_encode_ms = 0u64;
     let mut total_decode_ms = 0u64;
     let mut total_audio_s = 0f64;
@@ -121,6 +134,22 @@ fn samples_wer() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(out.status.success(), "--wav failed for {file}:\n{stderr}");
         let hyp_text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let segmented_out = Command::new(env!("CARGO_BIN_EXE_my-voice"))
+            .args(["-v", "--config"])
+            .arg(&config_path)
+            .arg("--wav")
+            .arg(&wav)
+            .arg("--segmented")
+            .output()
+            .expect("failed to run segmented my-voice");
+        let segmented_stderr = String::from_utf8_lossy(&segmented_out.stderr);
+        assert!(
+            segmented_out.status.success(),
+            "--wav --segmented failed for {file}:\n{segmented_stderr}"
+        );
+        let segmented_text = String::from_utf8_lossy(&segmented_out.stdout)
+            .trim()
+            .to_string();
 
         let reference = normalize(ref_text);
         let hypothesis = normalize(&hyp_text);
@@ -134,6 +163,15 @@ fn samples_wer() {
         strict_words += s_ref.len();
         strict_errors += s_errors;
 
+        let segmented_hypothesis = normalize(&segmented_text);
+        let segmented_file_errors = edit_distance(&reference, &segmented_hypothesis);
+        segmented_words += reference.len();
+        segmented_errors += segmented_file_errors;
+        let segmented_strict_hypothesis = normalize_strict(&segmented_text);
+        let segmented_file_strict_errors = edit_distance(&s_ref, &segmented_strict_hypothesis);
+        segmented_strict_words += s_ref.len();
+        segmented_strict_errors += segmented_file_strict_errors;
+
         let (enc, dec) = parse_timings(&stderr).unwrap_or((0, 0));
         total_encode_ms += enc;
         total_decode_ms += dec;
@@ -143,8 +181,10 @@ fn samples_wer() {
 
         let wer = errors as f64 / reference.len().max(1) as f64;
         let strict = s_errors as f64 / s_ref.len().max(1) as f64;
+        let segmented_wer = segmented_file_errors as f64 / reference.len().max(1) as f64;
+        let segmented_strict = segmented_file_strict_errors as f64 / s_ref.len().max(1) as f64;
         rows.push(format!(
-            "{file}: WER {wer:.2} strict {strict:.2} ({errors}/{} words)  encode {enc}ms decode {dec}ms RTF {rtf:.2}x\n    ref: {ref_text}\n    hyp: {hyp_text}",
+            "{file}: WER {wer:.2} strict {strict:.2}, segmented {segmented_wer:.2} strict {segmented_strict:.2} ({errors}/{} words)  encode {enc}ms decode {dec}ms RTF {rtf:.2}x\n    ref: {ref_text}\n    hyp: {hyp_text}\n    seg: {segmented_text}",
             reference.len()
         ));
     }
@@ -154,16 +194,20 @@ fn samples_wer() {
     let aggregate = total_errors as f64 / total_words as f64;
     let quiet = std::env::var_os("MY_VOICE_WER_QUIET").is_some();
     let strict_agg = strict_errors as f64 / strict_words.max(1) as f64;
+    let segmented_agg = segmented_errors as f64 / segmented_words.max(1) as f64;
+    let segmented_strict_agg =
+        segmented_strict_errors as f64 / segmented_strict_words.max(1) as f64;
     let proc_s = (total_encode_ms + total_decode_ms) as f64 / 1000.0;
     let rtf = proc_s / total_audio_s.max(0.001);
     if !quiet {
-        println!("\n== WER harness ({model}) ==");
+        let precision = if quantized { "int8" } else { "fp32" };
+        println!("\n== WER harness ({model} {precision}) ==");
         for row in &rows {
             println!("{row}");
         }
     }
     println!(
-        "aggregate WER {aggregate:.3} ({total_errors}/{total_words} words), strict WER {strict_agg:.3} ({strict_errors}/{strict_words} words)"
+        "aggregate WER {aggregate:.3} ({total_errors}/{total_words} words), strict WER {strict_agg:.3} ({strict_errors}/{strict_words} words); segmented WER {segmented_agg:.3} ({segmented_errors}/{segmented_words} words), strict WER {segmented_strict_agg:.3} ({segmented_strict_errors}/{segmented_strict_words} words)"
     );
     println!(
         "total encode {total_encode_ms}ms, decode {total_decode_ms}ms over {total_audio_s:.1}s audio — RTF {rtf:.3} ({:.1}x realtime)",
@@ -173,6 +217,10 @@ fn samples_wer() {
     assert!(
         aggregate <= max_wer,
         "aggregate WER {aggregate:.3} exceeds limit {max_wer}"
+    );
+    assert!(
+        segmented_agg <= max_wer,
+        "segmented aggregate WER {segmented_agg:.3} exceeds limit {max_wer}"
     );
 }
 

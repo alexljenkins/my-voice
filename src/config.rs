@@ -164,8 +164,8 @@ impl Config {
         Ok(())
     }
 
-    /// True if the model files for the configured model are present on disk.
-    /// Uses the registry sentinel file; returns false for unknown/custom models.
+    /// True if every file for the configured model variant is present on disk.
+    /// Returns false for unknown/custom models.
     pub fn is_model_downloaded(&self) -> bool {
         let Some(spec) = crate::models::find(&self.model) else {
             return false;
@@ -174,12 +174,12 @@ impl Config {
         if !dir.is_dir() {
             return false;
         }
-        let sentinel = if self.quantized {
-            spec.sentinel_quantized
+        let files = if self.quantized {
+            spec.files_quantized
         } else {
-            spec.sentinel_full
+            spec.files_full
         };
-        dir.join(sentinel).exists()
+        files.iter().all(|&(_, base)| dir.join(base).is_file())
     }
 
     /// Map `model` → the Moonshine model directory. Does not check existence.
