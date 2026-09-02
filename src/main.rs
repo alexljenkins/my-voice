@@ -13,11 +13,13 @@ mod text;
 mod transcriber;
 mod ui;
 
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use anyhow::Result;
@@ -64,8 +66,8 @@ struct Cli {
     #[arg(long, value_name = "N", default_value_t = 1)]
     bench_iters: usize,
 
-    /// Save each recording to <DIR>/<timestamp>.wav (and _raw.wav) while running
-    /// the normal hold-to-talk flow. Press Ctrl+C when done collecting samples.
+    /// Save one raw WAV per hold and append its transcript to <DIR>/expected.txt.
+    /// Press Ctrl+C when done collecting samples.
     #[arg(long, value_name = "DIR")]
     record: Option<PathBuf>,
 
@@ -433,22 +435,20 @@ fn spawn_transcription_worker(tx: mpsc::Sender<DaemonMsg>) -> SyncSender<Segment
             let text = if peak < 0.01 {
                 Ok(None)
             } else {
-                if let Some(dir) = record_dir {
-                    let stem = format!("{hold_id}_{segment_index:04}");
-                    let _ = write_wav(
-                        &segment.raw,
-                        segment.raw_rate,
-                        &dir.join(format!("{stem}_raw.wav")).to_string_lossy(),
-                    );
-                    let _ = write_wav(
-                        &processed,
-                        16_000,
-                        &dir.join(format!("{stem}.wav")).to_string_lossy(),
-                    );
-                }
-                cache
-                    .transcribe_for_hold(&processed)
-                    .map(|raw| post_process(&raw, &corrections))
+                let recording = record_dir
+                    .as_deref()
+                    .map(|dir| save_raw_recording(dir, hold_id, &segment.raw, segment.raw_rate))
+                    .transpose();
+                recording
+                    .and_then(|filename| {
+                        let text = cache
+                            .transcribe_for_hold(&processed)
+                            .map(|raw| post_process(&raw, &corrections))?;
+                        if let (Some(dir), Some(filename)) = (record_dir.as_deref(), filename) {
+                            append_expected(dir, &filename, &text)?;
+                        }
+                        Ok(text)
+                    })
                     .map(|text| (!text.is_empty()).then_some(text))
                     .map_err(|e| format!("{e:#}"))
             };
@@ -612,7 +612,7 @@ fn run_daemon(
                                 }
                             }
                         }
-                    } else if !hold.released {
+                    } else if !hold.released && record_dir.is_none() {
                         if let Some(segment) = recorder
                             .try_drain_segment(config.segment_pause_ms, config.segment_max_ms)
                         {
@@ -1242,6 +1242,30 @@ fn write_wav(samples: &[f32], rate: u32, path: &str) -> Result<()> {
     Ok(())
 }
 
+fn save_raw_recording(dir: &Path, hold_id: u64, raw: &[f32], raw_rate: u32) -> Result<String> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before Unix epoch")?
+        .as_millis();
+    let filename = format!("{timestamp}_{hold_id}_raw.wav");
+    let path = dir.join(&filename);
+    write_wav(raw, raw_rate, &path.to_string_lossy())?;
+    Ok(filename)
+}
+
+fn append_expected(dir: &Path, filename: &str, transcript: &str) -> Result<()> {
+    let transcript = transcript.replace(['\t', '\r', '\n'], " ");
+    let expected_path = dir.join("expected.txt");
+    let mut expected = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&expected_path)
+        .with_context(|| format!("opening {}", expected_path.display()))?;
+    writeln!(expected, "{filename}\t{transcript}")
+        .with_context(|| format!("writing {}", expected_path.display()))?;
+    Ok(())
+}
+
 fn init_tracing(verbose: u8, daemon: bool) -> Option<tracing_appender::non_blocking::WorkerGuard> {
     let make_filter = || {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| {
@@ -1539,6 +1563,43 @@ mod tests {
 
         drop(segment_tx);
         std::fs::remove_dir(&dir).unwrap();
+    }
+
+    #[test]
+    fn recording_writes_one_raw_wav_and_one_expected_line() {
+        let dir = std::env::temp_dir().join(format!("my-voice-recording-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let filename = save_raw_recording(&dir, 42, &[0.25, -0.25], 16_000).unwrap();
+        let wav = dir.join(&filename);
+        assert!(!dir.join("expected.txt").exists());
+        append_expected(&dir, &filename, "text with spaces").unwrap();
+
+        let wav_files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| {
+                let path = entry.unwrap().path();
+                (path.extension().and_then(|value| value.to_str()) == Some("wav")).then_some(path)
+            })
+            .collect();
+        assert_eq!(wav_files, [wav.clone()]);
+        assert!(wav
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with("_42_raw.wav"));
+        let expected = std::fs::read_to_string(dir.join("expected.txt")).unwrap();
+        assert_eq!(
+            expected,
+            format!(
+                "{}\ttext with spaces\n",
+                wav.file_name().unwrap().to_string_lossy()
+            )
+        );
+
+        std::fs::remove_file(wav).unwrap();
+        std::fs::remove_file(dir.join("expected.txt")).unwrap();
+        std::fs::remove_dir(dir).unwrap();
     }
 
     #[test]
