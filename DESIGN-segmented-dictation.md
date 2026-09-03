@@ -40,8 +40,8 @@ segment_pause_ms = 300
 segment_max_ms = 30000
 ```
 
-- `segment_pause_ms`: independent from `trailing_silence_ms`. Start at 300ms.
-- `segment_max_ms`: 30s soft maximum. The required pause shrinks linearly from 300ms to 120ms as the segment grows. At 48s (`segment_max_ms + 18000ms`), split unconditionally.
+- `segment_pause_ms`: independent from `trailing_silence_ms`. Start at 300ms. Segments under 3s require at least 800ms of silence.
+- `segment_max_ms`: 30s soft maximum. After 3s, the required pause shrinks toward 120ms. At 48s (`segment_max_ms + 18000ms`), split unconditionally.
 - Poll capture state every 200ms while recording (see the `recv_timeout` note under `src/main.rs` — no ticker thread).
 
 Both keys must also be added to `Config` + `Default` and to the `known` array in `warn_unknown_keys` (`src/config.rs:100`), or a config that sets them logs spurious unknown-key warnings, and to the config block in `README.md`. Neither belongs in `reload_actions`: they are read live at drain time, so a reload needs no rebuild.

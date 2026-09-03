@@ -17,6 +17,8 @@ const RAW_WINDOW_MS: u64 = 20;
 const RAW_SPEECH_RMS: f32 = 0.008;
 const FORCE_SPLIT_AFTER_SOFT_MS: u64 = 18_000;
 const MIN_SEGMENT_PAUSE_MS: u64 = 120;
+const EARLY_SEGMENT_MS: u64 = 3_000;
+const EARLY_PAUSE_MS: u64 = 800;
 const OVERLAP_SEARCH_MS: u64 = 2_000;
 const OVERLAP_PAUSE_MS: u64 = 40;
 
@@ -25,9 +27,10 @@ fn force_split_ms(soft_max_ms: u64) -> u64 {
 }
 
 /// Reduce the pause needed to close a segment as it approaches the soft cap.
-/// A fresh segment waits for a natural pause. At the soft cap, even a short
-/// hesitation closes it. Continuous speech gets another 18 seconds before a
-/// forced split.
+/// During the first 3 seconds, require a longer pause so a short hesitation
+/// does not produce a tiny model input. At the soft cap, even a short
+/// hesitation closes the segment. Continuous speech gets another 18 seconds
+/// before a forced split.
 fn adaptive_pause_ms(initial_pause_ms: u64, duration_ms: u64, soft_max_ms: u64) -> u64 {
     let initial = initial_pause_ms.max(MIN_SEGMENT_PAUSE_MS);
     if soft_max_ms == 0 || duration_ms >= soft_max_ms {
@@ -35,7 +38,12 @@ fn adaptive_pause_ms(initial_pause_ms: u64, duration_ms: u64, soft_max_ms: u64) 
     }
     let reduction =
         (initial - MIN_SEGMENT_PAUSE_MS) as u128 * duration_ms as u128 / soft_max_ms as u128;
-    initial - reduction as u64
+    let normal = initial - reduction as u64;
+    if duration_ms < EARLY_SEGMENT_MS {
+        normal.max(EARLY_PAUSE_MS)
+    } else {
+        normal
+    }
 }
 
 fn segment_drain_reason(
@@ -1014,7 +1022,11 @@ mod tests {
 
     #[test]
     fn pause_requirement_shrinks_toward_soft_cap() {
-        assert_eq!(adaptive_pause_ms(300, 0, 30_000), 300);
+        assert_eq!(adaptive_pause_ms(300, 0, 30_000), 800);
+        assert_eq!(adaptive_pause_ms(300, 1_000, 30_000), 800);
+        assert_eq!(adaptive_pause_ms(300, 2_000, 30_000), 800);
+        assert_eq!(adaptive_pause_ms(300, 2_999, 30_000), 800);
+        assert_eq!(adaptive_pause_ms(300, 3_000, 30_000), 282);
         assert_eq!(adaptive_pause_ms(300, 10_000, 30_000), 240);
         assert_eq!(adaptive_pause_ms(300, 20_000, 30_000), 180);
         assert_eq!(adaptive_pause_ms(300, 30_000, 30_000), 120);
@@ -1023,7 +1035,7 @@ mod tests {
 
     #[test]
     fn pause_requirement_never_drops_below_detector_window_floor() {
-        assert_eq!(adaptive_pause_ms(50, 0, 30_000), 120);
+        assert_eq!(adaptive_pause_ms(50, 0, 30_000), 800);
         assert_eq!(adaptive_pause_ms(300, 1, 0), 120);
     }
 
@@ -1035,11 +1047,11 @@ mod tests {
     #[test]
     fn segment_drain_tracks_the_shrinking_pause() {
         assert_eq!(
-            segment_drain_reason(1_000, 700, 293, 300, 30_000, false),
+            segment_drain_reason(1_200, 400, 799, 300, 30_000, false),
             None
         );
         assert_eq!(
-            segment_drain_reason(1_000, 700, 294, 300, 30_000, false),
+            segment_drain_reason(1_200, 400, 800, 300, 30_000, false),
             Some(DrainReason::Pause)
         );
         assert_eq!(
@@ -1085,15 +1097,15 @@ mod tests {
     #[test]
     fn wav_segmentation_polls_at_two_hundred_millisecond_boundaries() {
         let mut samples = vec![0.02; 6_400];
-        samples.extend(vec![0.0; 6_400]);
+        samples.extend(vec![0.0; 16_000]);
         samples.extend(vec![0.02; 3_200]);
 
         let segments = segment_samples(&samples, 16_000, 300, 30_000);
 
         assert_eq!(segments.len(), 2);
-        assert_eq!(segments[0].boundary_sample, 12_800);
+        assert_eq!(segments[0].boundary_sample, 19_200);
         assert_eq!(segments[0].segment.reason, DrainReason::Pause);
-        assert_eq!(segments[1].boundary_sample, 16_000);
+        assert_eq!(segments[1].boundary_sample, 25_600);
         assert_eq!(segments[1].segment.reason, DrainReason::Release);
     }
 
@@ -1103,18 +1115,18 @@ mod tests {
         let mut samples = vec![0.02; 200];
         samples.extend(vec![0.0; 60]);
         samples.extend(vec![0.02; 200]);
-        samples.extend(vec![0.0; 340]);
+        samples.extend(vec![0.0; 1_000]);
         samples.extend(vec![0.02; 200]);
 
         let segments = segment_samples(&samples, 1_000, 300, 30_000);
 
         assert_eq!(segments.len(), 2);
-        assert_eq!(segments[0].boundary_sample, 800);
+        assert_eq!(segments[0].boundary_sample, 1_400);
         assert_eq!(segments[0].segment.overlap_samples, 0);
         assert_eq!(segments[1].segment.reason, DrainReason::Release);
-        assert_eq!(segments[1].segment.overlap_samples, 600);
-        assert_eq!(&segments[1].segment.raw[..600], &samples[200..800]);
-        assert_eq!(&segments[1].segment.raw[600..], &samples[800..]);
+        assert_eq!(segments[1].segment.overlap_samples, 1_200);
+        assert_eq!(&segments[1].segment.raw[..1_200], &samples[200..1_400]);
+        assert_eq!(&segments[1].segment.raw[1_200..], &samples[1_400..]);
     }
 
     #[test]
