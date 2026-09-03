@@ -28,6 +28,7 @@ my-voice
 ```
 
 A microphone icon appears in the system tray. The default model download is about 345 MB.
+While you hold the recording key, a small orb at the bottom of the display reacts to your voice.
 
 <details>
 <summary>Complete the one-time Linux keyboard setup</summary>
@@ -67,7 +68,10 @@ Long dictation has no total duration limit. my-voice uses pauses to split speech
 
 ## Settings and help
 
-You can change the microphone, model, typing mode, and startup behavior from the tray menu.
+You can change the microphone, model, listening orb, typing mode, and startup behavior from the tray menu.
+
+The listening orb uses X11. It also works through XWayland when `DISPLAY` is available.
+If the overlay cannot start, dictation and the tray continue to work.
 
 <details>
 <summary>Configuration file</summary>
@@ -89,8 +93,13 @@ trailing_silence_ms = 300
 segment_pause_ms = 300
 segment_max_ms = 30000
 injection = "auto"
+indicator_style = "neutral"
 corrections = []
 ```
+
+`indicator_style` accepts `calm`, `agreeable`, `thoughtful`, `neutral`, `cold`,
+`defensive`, `anxious`, `frustrated`, `angry`, or `random`. The `random` option
+chooses a new style for each recording.
 
 Run with another file when you want separate settings.
 

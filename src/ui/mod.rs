@@ -7,6 +7,8 @@
 
 use std::sync::mpsc::Sender;
 
+use crate::indicator::IndicatorStyle;
+
 /// Visual state of the tray icon + status line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrayState {
@@ -64,6 +66,7 @@ pub struct TrayMenuState {
     pub inject_unlock_hint: String,
     pub grab: bool,
     pub clipboard_hotkey: bool,
+    pub indicator_style: IndicatorStyle,
     /// Whether the XDG autostart entry is currently installed.
     pub start_at_login: bool,
 }
@@ -82,6 +85,8 @@ pub enum UiCommand {
     SetGrab(bool),
     /// Toggle whether Shift+hotkey copies to clipboard instead of typing.
     SetClipboardHotkey(bool),
+    /// Change the listening orb's persisted appearance.
+    SetIndicatorStyle(IndicatorStyle),
     /// Open the key-capture popup, then apply the chosen hotkey (self-restart).
     CaptureHotkey,
     /// Enable/disable launching at login (XDG autostart entry).
