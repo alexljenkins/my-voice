@@ -26,24 +26,25 @@ fn force_split_ms(soft_max_ms: u64) -> u64 {
     soft_max_ms.saturating_add(FORCE_SPLIT_AFTER_SOFT_MS)
 }
 
-/// Reduce the pause needed to close a segment as it approaches the soft cap.
-/// During the first 3 seconds, require a longer pause so a short hesitation
-/// does not produce a tiny model input. At the soft cap, even a short
-/// hesitation closes the segment. Continuous speech gets another 18 seconds
-/// before a forced split.
+/// Keep the early pause threshold through the first 3 seconds, then reduce it
+/// linearly until the forced split. This avoids both tiny model inputs and a
+/// sudden threshold change at 3 seconds.
 fn adaptive_pause_ms(initial_pause_ms: u64, duration_ms: u64, soft_max_ms: u64) -> u64 {
-    let initial = initial_pause_ms.max(MIN_SEGMENT_PAUSE_MS);
-    if soft_max_ms == 0 || duration_ms >= soft_max_ms {
+    if soft_max_ms == 0 {
         return MIN_SEGMENT_PAUSE_MS;
     }
-    let reduction =
-        (initial - MIN_SEGMENT_PAUSE_MS) as u128 * duration_ms as u128 / soft_max_ms as u128;
-    let normal = initial - reduction as u64;
-    if duration_ms < EARLY_SEGMENT_MS {
-        normal.max(EARLY_PAUSE_MS)
-    } else {
-        normal
+    let initial = initial_pause_ms.max(EARLY_PAUSE_MS);
+    if duration_ms <= EARLY_SEGMENT_MS {
+        return initial;
     }
+    let forced_split_ms = force_split_ms(soft_max_ms);
+    if duration_ms >= forced_split_ms {
+        return MIN_SEGMENT_PAUSE_MS;
+    }
+    let ramp_ms = forced_split_ms - EARLY_SEGMENT_MS;
+    let elapsed_ms = duration_ms - EARLY_SEGMENT_MS;
+    let reduction = (initial - MIN_SEGMENT_PAUSE_MS) as u128 * elapsed_ms as u128 / ramp_ms as u128;
+    initial - reduction as u64
 }
 
 fn segment_drain_reason(
@@ -1021,16 +1022,19 @@ mod tests {
     }
 
     #[test]
-    fn pause_requirement_shrinks_toward_soft_cap() {
+    fn pause_requirement_shrinks_toward_forced_split() {
         assert_eq!(adaptive_pause_ms(300, 0, 30_000), 800);
         assert_eq!(adaptive_pause_ms(300, 1_000, 30_000), 800);
         assert_eq!(adaptive_pause_ms(300, 2_000, 30_000), 800);
         assert_eq!(adaptive_pause_ms(300, 2_999, 30_000), 800);
-        assert_eq!(adaptive_pause_ms(300, 3_000, 30_000), 282);
-        assert_eq!(adaptive_pause_ms(300, 10_000, 30_000), 240);
-        assert_eq!(adaptive_pause_ms(300, 20_000, 30_000), 180);
-        assert_eq!(adaptive_pause_ms(300, 30_000, 30_000), 120);
-        assert_eq!(adaptive_pause_ms(300, 40_000, 30_000), 120);
+        assert_eq!(adaptive_pause_ms(300, 3_000, 30_000), 800);
+        assert_eq!(adaptive_pause_ms(300, 5_000, 30_000), 770);
+        assert_eq!(adaptive_pause_ms(300, 10_000, 30_000), 695);
+        assert_eq!(adaptive_pause_ms(300, 20_000, 30_000), 544);
+        assert_eq!(adaptive_pause_ms(300, 30_000, 30_000), 392);
+        assert_eq!(adaptive_pause_ms(300, 40_000, 30_000), 241);
+        assert_eq!(adaptive_pause_ms(300, 47_000, 30_000), 136);
+        assert_eq!(adaptive_pause_ms(300, 48_000, 30_000), 120);
     }
 
     #[test]
@@ -1055,11 +1059,11 @@ mod tests {
             Some(DrainReason::Pause)
         );
         assert_eq!(
-            segment_drain_reason(20_000, 18_000, 180, 300, 30_000, false),
+            segment_drain_reason(20_000, 18_000, 544, 300, 30_000, false),
             Some(DrainReason::Pause)
         );
         assert_eq!(
-            segment_drain_reason(30_000, 28_000, 120, 300, 30_000, false),
+            segment_drain_reason(30_000, 28_000, 392, 300, 30_000, false),
             Some(DrainReason::MaxDuration)
         );
     }
