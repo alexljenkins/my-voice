@@ -4,53 +4,13 @@ Sorted roughly by estimated value-to-effort ratio — highest ROI first.
 
 ---
 
-## 1. macOS menu-bar tray
-
-**What:** Implement the `ui/macos.rs` stub (currently a no-op). Use `tray-icon` + `winit` or `tao`. The macOS event loop must own the main thread, so the daemon loop moves to a background thread — the architecture already notes this.
-
-**Why it matters:** Right now macOS users have zero feedback: no icon, no way to switch models or mics, no status during transcription. The Linux tray is fully featured; parity here turns macOS from "works if you know what you're doing" to "works for anyone".
-
-**Effort:** Medium. The Linux tray is a solid reference implementation. The main challenge is the thread inversion (event loop on main, daemon on background).
-
----
-
-## 2. macOS start-at-login
-
-**What:** Implement `autostart::set_enabled` for macOS via `launchctl` and a `LaunchAgents` plist, mirroring the Linux XDG autostart entry.
-
-**Why it matters:** For macOS users to actually use this daily it needs to survive a reboot without manual terminal intervention. This is table-stakes UX for a productivity tool.
-
-**Effort:** Low. The Linux path is a clean template; plist generation is ~30 lines.
-
----
-
-## 3. macOS desktop notification
-
-**What:** `notify/send_platform` on macOS currently falls back to `tracing::warn!`. Wire up `notify-rust`'s macOS backend (it uses `osascript` / `UNUserNotificationCenter`) or use `osascript` directly to send real desktop banners.
-
-**Why it matters:** First-run download progress, "model ready", and error recovery all surface as invisible tracing logs on macOS. These are key onboarding moments.
-
-**Effort:** Very low. `notify-rust` already supports macOS; it likely just needs the right feature flag or a `#[cfg]` branch.
-
----
-
 ## 4. Hotplug mic detection
 
 **What:** When a USB microphone (or Bluetooth headset) is plugged in after the daemon starts, detect it and update the mic submenu — optionally auto-switch if the user had configured that device previously.
 
 **Why it matters:** The current note in the README ("Restart the daemon. Hotplug detection isn't supported in v1.") is the most jarring paper-cut for wireless headset users.
 
-**Effort:** Medium. On Linux: inotify or udev rules watching `/dev/input`. On macOS: `CoreAudio` property listeners. The hot-swap itself (rebuilding `AudioRecorder`) is already coded in `apply_reload`.
-
----
-
-## 5. Configurable hotkey on macOS
-
-**What:** The macOS hotkey is hard-wired to CapsLock (remapped to F18 via `hidutil`). Support arbitrary keys the way Linux does (evdev lets you grab any key).
-
-**Why it matters:** Power users on macOS can't use CapsLock for other things. Many prefer `Fn`, `Right Option`, or a media key.
-
-**Effort:** Medium-high. The `hidutil` remap approach is CapsLock-specific; an arbitrary key would need a different mechanism (Karabiner elements API, or a raw HID approach). A simpler short-term win: support a small fixed set of "safe" remap targets (F13–F19 are unused on most Macs).
+**Effort:** Medium. Use inotify or udev rules watching `/dev/input`. The hot-swap itself is already coded in `apply_reload`.
 
 ---
 
@@ -104,10 +64,10 @@ Sorted roughly by estimated value-to-effort ratio — highest ROI first.
 
 ---
 
-## 11. Packaging: `.deb` / `.pkg` / Homebrew formula
+## 11. Packaging: `.deb`
 
-**What:** Provide pre-built binaries so users don't need Rust installed. A GitHub Actions release workflow that cross-compiles and publishes a `.deb` (Linux x86_64/ARM64) and a macOS `.pkg` or DMG. A Homebrew formula pointing at the release binary.
+**What:** Provide pre-built Linux binaries so users do not need Rust installed. Publish `.deb` packages for x86_64 and ARM64.
 
-**Why it matters:** "Install Rust" is the single biggest barrier for non-developers. A `brew install my-voice` or `apt install my-voice` install path opens the audience by an order of magnitude.
+**Why it matters:** "Install Rust" is the single biggest barrier for non-developers. An `apt install my-voice` path removes that barrier.
 
-**Effort:** Medium. The Rust binary is statically linked (no `.so` deps beyond `libasound2` on Linux). The main work is the Actions workflow, signing (macOS notarization), and the Homebrew tap setup.
+**Effort:** Medium. The Rust binary has no shared dependencies beyond `libasound2`. The main work is the release workflow and package metadata.

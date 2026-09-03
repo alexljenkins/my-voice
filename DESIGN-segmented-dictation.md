@@ -162,7 +162,7 @@ Factor the current `handle_utterance` into transcription and injection stages. `
 
 Join non-empty segment text with one ASCII space. Do not add a leading space before the first non-empty result.
 
-- Change `Injector::inject` to return the effective `DeliveryMode::{Typed, Clipboard}`. This reports what actually happened on every platform, including Linux chain demotion and macOS CGEvent → pbcopy fallback.
+- Change `Injector::inject` to return the effective `DeliveryMode::{Typed, Clipboard}`. This reports Linux chain demotion.
 - **Typing mode:** inject only the newly joined chunk, prefixed with a space after the first successfully injected chunk.
 - **External typing speed:** use 2ms key hold and delay for `ydotool`. Keep 1ms spacing for `wtype` and `xdotool`. Zero-delay typing drops events in some target apps.
 - **Clipboard-only mode:** append to `accumulated_text`, then overwrite the clipboard with the complete accumulated hold after every result. On release, clipboard therefore contains the full dictation rather than only the last segment.

@@ -115,8 +115,7 @@ error but nothing persistent/reviewable.
 A rolling log is written to `~/.local/state/my-voice/my-voice.log`. No menu item
 points to it, opens it, or surfaces recent errors.
 
-### 3g. Platform gaps
-- **macOS has no tray UI at all** — *every* setting is config-file-only there. The graphical surface in §1a does not exist on Mac.
+### 3g. Headless sessions
 - On Linux with no D-Bus / tray host, the daemon runs **headless** (no icon) and the user has no GUI either.
 
 ---
@@ -134,5 +133,4 @@ tuning, granular injection backend, custom model paths, threads, model storage d
 dropped (too quiet / too short / too long), download size before commit, model
 warm-up & eviction state, post-processing, a place to review past errors/logs.
 
-**Platform-conditional:** the entire GUI is Linux-only; macOS and headless Linux
-have *no* graphical settings surface at all.
+**Headless sessions:** Linux sessions without a tray host have no graphical settings surface.

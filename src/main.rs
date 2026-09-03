@@ -1,10 +1,12 @@
+#[cfg(not(target_os = "linux"))]
+compile_error!("my-voice supports Linux only");
+
 mod audio;
 mod autostart;
 mod config;
 mod download;
 mod hotkey;
 mod injector;
-#[cfg(target_os = "linux")]
 mod keybind_capture;
 mod model_cache;
 mod models;
@@ -89,7 +91,6 @@ struct Cli {
 
     /// Open the key-capture popup, write the chosen hotkey to config, exit.
     /// Spawned as a subprocess by the tray's "Set keybind…"; not for direct use.
-    #[cfg(target_os = "linux")]
     #[arg(long, hide = true)]
     set_hotkey: bool,
 
@@ -108,10 +109,7 @@ fn main() {
     let debug_invocation = cli.test || cli.wav.is_some();
     #[cfg(not(feature = "debug-tools"))]
     let debug_invocation = false;
-    #[cfg(target_os = "linux")]
     let set_hotkey = cli.set_hotkey;
-    #[cfg(not(target_os = "linux"))]
-    let set_hotkey = false;
     let is_daemon = !cli.download
         && !debug_invocation
         && !cli.list_devices
@@ -141,7 +139,6 @@ fn run(cli: Cli) -> Result<()> {
         return print_man();
     }
 
-    #[cfg(target_os = "linux")]
     if cli.set_hotkey {
         return run_set_hotkey(cli.config.as_deref());
     }
@@ -211,7 +208,6 @@ fn status_line(pid: Option<i32>, model: &str) -> String {
 
 /// Signal-0 liveness probe: the process exists (or we lack permission to signal
 /// a process that does). ESRCH alone means dead.
-#[cfg(unix)]
 fn process_alive(pid: i32) -> bool {
     unsafe {
         libc::kill(pid, 0) == 0
@@ -223,7 +219,6 @@ fn process_alive(pid: i32) -> bool {
 /// if the user commits a key, persist it and exit 0; on cancel exit 10 so the
 /// parent daemon knows not to restart. Runs its own (winit) event loop, which is
 /// why it's a separate process rather than a thread inside the daemon.
-#[cfg(target_os = "linux")]
 fn run_set_hotkey(config_path: Option<&Path>) -> Result<()> {
     match keybind_capture::capture()? {
         Some(hotkey) => {
@@ -366,20 +361,13 @@ fn run_wav(config: &Config, path: &std::path::Path, iters: usize, segmented: boo
 /// real memory footprint. Returns None where /proc isn't available.
 #[cfg(feature = "debug-tools")]
 fn peak_rss_kb() -> Option<u64> {
-    #[cfg(target_os = "linux")]
-    {
-        let status = std::fs::read_to_string("/proc/self/status").ok()?;
-        for line in status.lines() {
-            if let Some(rest) = line.strip_prefix("VmHWM:") {
-                return rest.split_whitespace().next()?.parse().ok();
-            }
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmHWM:") {
+            return rest.split_whitespace().next()?.parse().ok();
         }
-        None
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
-    }
+    None
 }
 
 /// Record a fixed 3s window, dump a debug wav, transcribe, and print — verifies
@@ -413,7 +401,6 @@ enum DaemonMsg {
     /// The cpal input stream died mid-capture (mic unplugged, server gone).
     AudioFailed(String),
     /// The keybind-capture subprocess committed a new hotkey to disk.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     HotkeyCaptured,
     SegmentComplete(SegmentResult),
 }
@@ -571,7 +558,6 @@ fn run_daemon(
     // Enumerate input devices once at startup for the tray mic submenu.
     let audio_devices = audio::input_devices();
 
-    #[cfg(unix)]
     install_signal_handlers();
 
     // One channel, two producers. The hotkey listener and tray each get their
@@ -582,7 +568,6 @@ fn run_daemon(
 
     let (hk_tx, hk_rx) = mpsc::channel::<HotkeyEvent>();
     if let Err(e) = spawn_listener(&config, hk_tx) {
-        #[cfg(target_os = "linux")]
         notify::once(
             notify::ErrorKind::HotkeySetupNeeded,
             "Hotkey setup needed",
@@ -890,12 +875,10 @@ fn run_daemon(
             // "Set keybind…": launch the capture popup as a subprocess. It writes
             // the chosen hotkey to disk and exits; HotkeyCaptured then restarts us.
             DaemonMsg::Ui(UiCommand::CaptureHotkey) => {
-                #[cfg(target_os = "linux")]
                 spawn_keybind_capture(config_path.clone(), daemon_tx.clone());
             }
             DaemonMsg::HotkeyCaptured => {
                 info!("hotkey changed via popup — restarting to apply");
-                hotkey::restore_platform();
                 restart_self();
             }
 
@@ -933,7 +916,6 @@ fn run_daemon(
                 let mut updated = config.clone();
                 updated.grab = g;
                 save_config(&updated, config_path.as_deref());
-                hotkey::restore_platform();
                 restart_self();
             }
 
@@ -973,7 +955,6 @@ fn run_daemon(
         }
     }
 
-    hotkey::restore_platform();
     Ok(())
 }
 
@@ -1143,7 +1124,6 @@ fn build_tray_menu(config: &Config, audio_devices: &[audio::AudioDevice]) -> Tra
 
 /// Spawn the keybind-capture popup as a subprocess and, if it commits a new
 /// hotkey (exit 0), signal the daemon to restart so the new hotkey takes effect.
-#[cfg(target_os = "linux")]
 fn spawn_keybind_capture(config_path: Option<PathBuf>, tx: mpsc::Sender<DaemonMsg>) {
     thread::spawn(move || {
         let exe = match std::env::current_exe() {
@@ -1182,14 +1162,12 @@ fn spawn_keybind_capture(config_path: Option<PathBuf>, tx: mpsc::Sender<DaemonMs
 /// The child is launched with `MY_VOICE_RESTART=1` so its single-instance lock
 /// acquire retries briefly: parent and child overlap for the few ms until the
 /// parent exits and releases the flock.
-#[cfg(unix)]
 fn restart_self() -> ! {
     let exe = std::env::current_exe().unwrap_or_else(|e| {
         warn!("current_exe failed, cannot restart: {e}");
         std::process::exit(1);
     });
     let args: Vec<String> = std::env::args().skip(1).collect();
-    hotkey::restore_platform();
     match std::process::Command::new(exe)
         .args(args)
         .env("MY_VOICE_RESTART", "1")
@@ -1430,12 +1408,9 @@ fn init_tracing(verbose: u8, daemon: bool) -> Option<tracing_appender::non_block
     }
 }
 
-/// On any clean exit (SIGINT, SIGTERM) restore platform state and let the OS
-/// close file descriptors, which releases evdev grabs and the flock.
-#[cfg(unix)]
+/// On any clean exit, let the OS close file descriptors.
 fn install_signal_handlers() {
     extern "C" fn handler(_sig: libc::c_int) {
-        hotkey::restore_platform(); // restores hidutil on macOS; no-op on Linux
         std::process::exit(0);
     }
     unsafe {

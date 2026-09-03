@@ -42,7 +42,6 @@ pub fn send(title: &str, body: &str) {
     send_platform(title, body);
 }
 
-#[cfg(target_os = "linux")]
 fn send_platform(title: &str, body: &str) {
     use notify_rust::Notification;
     if let Err(e) = Notification::new()
@@ -53,10 +52,4 @@ fn send_platform(title: &str, body: &str) {
     {
         tracing::debug!("desktop notification failed: {e}");
     }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn send_platform(title: &str, body: &str) {
-    // macOS: notify-rust works from a signed .app bundle; dev builds fall back to tracing.
-    tracing::warn!("[notify] {title}: {body}");
 }
