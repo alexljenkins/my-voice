@@ -35,7 +35,7 @@ use config::Config;
 use hotkey::{spawn_listener, HotkeyEvent};
 use injector::{DeliveryMode, Injector};
 use model_cache::ModelCache;
-use text::post_process;
+use text::{post_process, BoundaryTextJoiner};
 use ui::{ModelItem, TrayMenuState, TrayState, UiCommand, UiHandle};
 
 #[cfg(feature = "debug-tools")]
@@ -296,19 +296,46 @@ fn run_wav(config: &Config, path: &std::path::Path, iters: usize, segmented: boo
             .sum::<u64>();
         for _ in 0..iters {
             text.clear();
+            let mut audio_processor = audio::CaptureProcessor::new(16_000);
+            let mut text_joiner = BoundaryTextJoiner::default();
             for timed in &segments {
-                let processed = audio::process_capture(
-                    &audio::resample(&timed.segment.raw, timed.segment.raw_rate, 16_000),
+                let resampled = audio::resample(&timed.segment.raw, timed.segment.raw_rate, 16_000);
+                let overlap_samples = audio::resampled_sample_count(
+                    timed.segment.overlap_samples,
+                    timed.segment.raw_rate,
                     16_000,
                 );
+                let processed = audio_processor.process_with_overlap(&resampled, overlap_samples);
                 let peak = processed.iter().fold(0.0f32, |a, b| a.max(b.abs()));
                 if timed.segment.observed_speech_ms == 0 || peak < 0.01 {
+                    if let Some(chunk) = text_joiner.break_boundary() {
+                        append_joined(&mut text, &chunk);
+                    }
                     continue;
                 }
-                let segment_text =
-                    post_process(&transcriber.transcribe(&processed)?, &config.corrections);
-                if !segment_text.is_empty() {
-                    append_joined(&mut text, &segment_text);
+                let raw_text = match transcriber.transcribe(&processed) {
+                    Ok(raw_text) => raw_text,
+                    Err(error) => {
+                        if let Some(chunk) = text_joiner.break_boundary() {
+                            append_joined(&mut text, &chunk);
+                        }
+                        warn!("segment transcription failed: {error:#}");
+                        continue;
+                    }
+                };
+                let segment_text = post_process(&raw_text, &config.corrections);
+                if segment_text.is_empty() {
+                    if let Some(chunk) = text_joiner.break_boundary() {
+                        append_joined(&mut text, &chunk);
+                    }
+                    continue;
+                }
+                if let Some(chunk) = text_joiner.push(
+                    &segment_text,
+                    timed.segment.reason == audio::DrainReason::Release,
+                    timed.segment.overlap_samples > 0,
+                ) {
+                    append_joined(&mut text, &chunk);
                 }
             }
         }
@@ -391,12 +418,45 @@ struct SegmentRequest {
 struct SegmentResult {
     hold_id: u64,
     segment_index: u32,
+    final_segment: bool,
+    has_audio_overlap: bool,
     text: Result<Option<String>, String>,
+}
+
+struct WorkerAudioState {
+    hold_id: Option<u64>,
+    processor: Option<audio::CaptureProcessor>,
+}
+
+impl WorkerAudioState {
+    fn new() -> Self {
+        Self {
+            hold_id: None,
+            processor: None,
+        }
+    }
+
+    fn begin_hold(&mut self, hold_id: u64) -> bool {
+        if self.hold_id == Some(hold_id) {
+            return false;
+        }
+        self.hold_id = Some(hold_id);
+        self.processor = Some(audio::CaptureProcessor::new(16_000));
+        true
+    }
+
+    fn process(&mut self, samples: &[f32], overlap_samples: usize) -> Vec<f32> {
+        self.processor
+            .as_mut()
+            .expect("begin_hold must run before audio processing")
+            .process_with_overlap(samples, overlap_samples)
+    }
 }
 
 fn spawn_transcription_worker(tx: mpsc::Sender<DaemonMsg>) -> SyncSender<SegmentRequest> {
     let (request_tx, request_rx) = mpsc::sync_channel::<SegmentRequest>(3);
     thread::spawn(move || {
+        let mut audio_state = WorkerAudioState::new();
         for request in request_rx {
             let SegmentRequest {
                 hold_id,
@@ -407,18 +467,23 @@ fn spawn_transcription_worker(tx: mpsc::Sender<DaemonMsg>) -> SyncSender<Segment
                 record_dir,
             } = request;
             debug!(?segment.reason, hold_id, segment_index, "processing audio segment");
+            audio_state.begin_hold(hold_id);
+            let final_segment = segment.reason == audio::DrainReason::Release;
+            let has_audio_overlap = segment.overlap_samples > 0;
             if segment.observed_speech_ms == 0 {
                 let _ = tx.send(DaemonMsg::SegmentComplete(SegmentResult {
                     hold_id,
                     segment_index,
+                    final_segment,
+                    has_audio_overlap,
                     text: Ok(None),
                 }));
                 continue;
             }
-            let processed = audio::process_capture(
-                &audio::resample(&segment.raw, segment.raw_rate, 16_000),
-                16_000,
-            );
+            let resampled = audio::resample(&segment.raw, segment.raw_rate, 16_000);
+            let overlap_samples =
+                audio::resampled_sample_count(segment.overlap_samples, segment.raw_rate, 16_000);
+            let processed = audio_state.process(&resampled, overlap_samples);
             let peak = processed.iter().fold(0.0f32, |a, b| a.max(b.abs()));
             let text = if peak < 0.01 {
                 Ok(None)
@@ -443,6 +508,8 @@ fn spawn_transcription_worker(tx: mpsc::Sender<DaemonMsg>) -> SyncSender<Segment
             let _ = tx.send(DaemonMsg::SegmentComplete(SegmentResult {
                 hold_id,
                 segment_index,
+                final_segment,
+                has_audio_overlap,
                 text,
             }));
         }
@@ -658,6 +725,7 @@ fn run_daemon(
                         released: false,
                         audio_error: false,
                         pending_drain: None,
+                        text_joiner: BoundaryTextJoiner::default(),
                     });
                     next_hold_id += 1;
                 }
@@ -715,11 +783,36 @@ fn run_daemon(
                             for prior in deferred {
                                 deliver_text(hold, &prior, typer.as_mut(), clipper.as_mut());
                             }
-                            deliver_text(hold, &text, typer.as_mut(), clipper.as_mut());
+                            if let Some(chunk) = hold.text_joiner.push(
+                                &text,
+                                result.final_segment,
+                                result.has_audio_overlap,
+                            ) {
+                                deliver_text(hold, &chunk, typer.as_mut(), clipper.as_mut());
+                            }
                         }
-                        Ok(Some(text)) => hold.deferred_text.push(text),
-                        Ok(None) => {}
+                        Ok(Some(text)) => {
+                            if let Some(chunk) = hold.text_joiner.push(
+                                &text,
+                                result.final_segment,
+                                result.has_audio_overlap,
+                            ) {
+                                hold.deferred_text.push(chunk);
+                            }
+                        }
+                        Ok(None) => flush_pending_boundary(
+                            hold,
+                            config.min_speech_ms,
+                            typer.as_mut(),
+                            clipper.as_mut(),
+                        ),
                         Err(e) => {
+                            flush_pending_boundary(
+                                hold,
+                                config.min_speech_ms,
+                                typer.as_mut(),
+                                clipper.as_mut(),
+                            );
                             warn!("segment transcription failed: {e}");
                             hold.delivery_failed = true;
                         }
@@ -1124,6 +1217,7 @@ struct HoldState {
     released: bool,
     audio_error: bool,
     pending_drain: Option<DrainedSegment>,
+    text_joiner: BoundaryTextJoiner,
 }
 
 fn append_joined(target: &mut String, text: &str) {
@@ -1133,11 +1227,33 @@ fn append_joined(target: &mut String, text: &str) {
     target.push_str(text);
 }
 
+fn flush_pending_boundary(
+    hold: &mut HoldState,
+    min_speech_ms: u64,
+    typer: &mut dyn Injector,
+    clipper: &mut dyn Injector,
+) {
+    let Some(chunk) = hold.text_joiner.break_boundary() else {
+        return;
+    };
+    if hold.observed_speech_ms < min_speech_ms {
+        hold.deferred_text.push(chunk);
+        return;
+    }
+    let deferred = std::mem::take(&mut hold.deferred_text);
+    for prior in deferred {
+        deliver_text(hold, &prior, typer, clipper);
+    }
+    deliver_text(hold, &chunk, typer, clipper);
+}
+
 /// Preserve the final live audio when a previously drained segment is waiting
 /// for queue space. Both buffers are contiguous samples from the same stream.
 fn merge_release_segment(mut pending: DrainedSegment, tail: DrainedSegment) -> DrainedSegment {
     debug_assert_eq!(pending.raw_rate, tail.raw_rate);
-    pending.raw.extend(tail.raw);
+    pending
+        .raw
+        .extend_from_slice(&tail.raw[tail.overlap_samples.min(tail.raw.len())..]);
     pending.observed_speech_ms = pending
         .observed_speech_ms
         .saturating_add(tail.observed_speech_ms);
@@ -1476,7 +1592,18 @@ mod tests {
             released: false,
             audio_error: false,
             pending_drain: None,
+            text_joiner: BoundaryTextJoiner::default(),
         }
+    }
+
+    #[test]
+    fn worker_audio_state_resets_only_between_holds() {
+        let mut state = WorkerAudioState::new();
+
+        assert!(state.begin_hold(1));
+        assert!(!state.begin_hold(1));
+        assert!(state.begin_hold(2));
+        assert_eq!(state.hold_id, Some(2));
     }
 
     fn cfg() -> Config {
@@ -1530,6 +1657,7 @@ mod tests {
                     raw_rate: 16_000,
                     observed_speech_ms: 0,
                     reason: audio::DrainReason::Release,
+                    overlap_samples: 0,
                 },
                 cache,
                 corrections: Vec::new(),
@@ -1594,12 +1722,14 @@ mod tests {
             raw_rate: 16_000,
             observed_speech_ms: 200,
             reason: audio::DrainReason::Pause,
+            overlap_samples: 0,
         };
         let tail = DrainedSegment {
-            raw: vec![3.0, 4.0],
+            raw: vec![2.0, 3.0, 4.0],
             raw_rate: 16_000,
             observed_speech_ms: 100,
             reason: audio::DrainReason::Release,
+            overlap_samples: 1,
         };
 
         let merged = merge_release_segment(pending, tail);

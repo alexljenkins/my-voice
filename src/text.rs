@@ -26,6 +26,112 @@ pub fn post_process(s: &str, corrections: &[(String, String)]) -> String {
     apply_corrections(out.trim(), corrections)
 }
 
+/// Joins independently transcribed segments without emitting an uncertain
+/// boundary word until the following segment can confirm the duplicate.
+#[derive(Debug, Default)]
+pub struct BoundaryTextJoiner {
+    pending_word: Option<String>,
+}
+
+impl BoundaryTextJoiner {
+    pub fn push(
+        &mut self,
+        text: &str,
+        final_segment: bool,
+        has_audio_overlap: bool,
+    ) -> Option<String> {
+        let incoming = text.trim();
+        let resolved = match self.pending_word.take() {
+            Some(pending) if incoming.is_empty() => return Some(pending),
+            Some(pending) => resolve_boundary(&pending, incoming, has_audio_overlap),
+            None => incoming.to_string(),
+        };
+
+        if final_segment {
+            return (!resolved.is_empty()).then_some(resolved);
+        }
+
+        match split_final_word(&resolved) {
+            Some((stable, pending)) => {
+                self.pending_word = Some(pending.to_string());
+                (!stable.is_empty()).then_some(stable.to_string())
+            }
+            None => (!resolved.is_empty()).then_some(resolved),
+        }
+    }
+
+    pub fn break_boundary(&mut self) -> Option<String> {
+        self.pending_word
+            .take()
+            .filter(|pending| !pending.is_empty())
+    }
+}
+
+fn resolve_boundary(left: &str, right: &str, has_audio_overlap: bool) -> String {
+    let Some((right_word, right_core_end)) = first_word(right) else {
+        return join_with_space(left, right);
+    };
+    if !has_audio_overlap || normalize_word(left) != normalize_word(right_word) {
+        return join_with_space(left, right);
+    }
+
+    let left_core_end = left
+        .char_indices()
+        .rfind(|(_, character)| character.is_alphanumeric())
+        .map(|(index, character)| index + character.len_utf8())
+        .unwrap_or(left.len());
+    let mut joined = String::with_capacity(left_core_end + right.len() - right_core_end);
+    joined.push_str(&left[..left_core_end]);
+    joined.push_str(&right[right_core_end..]);
+    joined
+}
+
+fn first_word(text: &str) -> Option<(&str, usize)> {
+    let core_start = text
+        .char_indices()
+        .find(|(_, character)| character.is_alphanumeric())?
+        .0;
+    let token_end = text[core_start..]
+        .char_indices()
+        .find(|(_, character)| character.is_whitespace())
+        .map(|(index, _)| core_start + index)
+        .unwrap_or(text.len());
+    let core_end = text[core_start..token_end]
+        .char_indices()
+        .rfind(|(_, character)| character.is_alphanumeric())
+        .map(|(index, character)| core_start + index + character.len_utf8())?;
+    Some((&text[core_start..core_end], core_end))
+}
+
+fn normalize_word(word: &str) -> String {
+    word.chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn split_final_word(text: &str) -> Option<(&str, &str)> {
+    let trimmed = text.trim_end();
+    let final_word = trimmed
+        .char_indices()
+        .rfind(|(_, character)| character.is_alphanumeric())?
+        .0;
+    let token_start = trimmed[..final_word]
+        .char_indices()
+        .rfind(|(_, character)| character.is_whitespace())
+        .map(|(index, character)| index + character.len_utf8())
+        .unwrap_or(0);
+    Some((trimmed[..token_start].trim_end(), &trimmed[token_start..]))
+}
+
+fn join_with_space(left: &str, right: &str) -> String {
+    match (left.is_empty(), right.is_empty()) {
+        (true, _) => right.to_string(),
+        (_, true) => left.to_string(),
+        (false, false) => format!("{left} {right}"),
+    }
+}
+
 /// Zero-width, byte-order-mark, bidirectional-control, soft-hyphen and tag
 /// characters: rendered as nothing, yet able to break injection or hide intent.
 /// Visible content (accents, combining marks, CJK, emoji) is deliberately *not*
@@ -102,7 +208,7 @@ fn apply_corrections(s: &str, corrections: &[(String, String)]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::post_process;
+    use super::{post_process, BoundaryTextJoiner};
 
     fn pp(s: &str) -> String {
         post_process(s, &[])
@@ -196,5 +302,106 @@ mod tests {
     #[test]
     fn empty_corrections_is_noop() {
         assert_eq!(post_process("git hub", &[]), "git hub");
+    }
+
+    #[test]
+    fn boundary_join_keeps_left_word_and_right_punctuation() {
+        let mut joiner = BoundaryTextJoiner::default();
+        assert_eq!(
+            joiner.push("Hello world.", false, false).as_deref(),
+            Some("Hello")
+        );
+        assert_eq!(
+            joiner.push("World, this works.", true, true).as_deref(),
+            Some("world, this works.")
+        );
+    }
+
+    #[test]
+    fn boundary_join_keeps_exact_left_spelling() {
+        let mut joiner = BoundaryTextJoiner::default();
+        assert_eq!(
+            joiner.push("So happy. Someone...", false, false).as_deref(),
+            Some("So happy.")
+        );
+        assert_eq!(
+            joiner.push("someone helped", true, true).as_deref(),
+            Some("Someone helped")
+        );
+    }
+
+    #[test]
+    fn boundary_join_ignores_leading_punctuation_and_capitalization() {
+        let mut joiner = BoundaryTextJoiner::default();
+        assert_eq!(
+            joiner.push("say hello!", false, false).as_deref(),
+            Some("say")
+        );
+        assert_eq!(
+            joiner.push("... HELLO? Again", true, true).as_deref(),
+            Some("hello? Again")
+        );
+    }
+
+    #[test]
+    fn boundary_join_preserves_both_words_on_mismatch() {
+        let mut joiner = BoundaryTextJoiner::default();
+        assert_eq!(
+            joiner.push("hello world.", false, false).as_deref(),
+            Some("hello")
+        );
+        assert_eq!(
+            joiner.push("Different start.", true, true).as_deref(),
+            Some("world. Different start.")
+        );
+    }
+
+    #[test]
+    fn release_flushes_an_unconfirmed_boundary_word() {
+        let mut joiner = BoundaryTextJoiner::default();
+        assert_eq!(
+            joiner.push("only word.", false, false).as_deref(),
+            Some("only")
+        );
+        assert_eq!(joiner.push("", true, false).as_deref(), Some("word."));
+        assert_eq!(joiner.break_boundary(), None);
+    }
+
+    #[test]
+    fn equal_words_without_audio_overlap_are_both_kept() {
+        let mut joiner = BoundaryTextJoiner::default();
+        assert_eq!(joiner.push("very", false, false), None);
+        assert_eq!(
+            joiner.push("Very good", true, false).as_deref(),
+            Some("very Very good")
+        );
+    }
+
+    #[test]
+    fn empty_transcript_breaks_the_pending_boundary() {
+        let mut joiner = BoundaryTextJoiner::default();
+        assert_eq!(
+            joiner.push("first word", false, false).as_deref(),
+            Some("first")
+        );
+        assert_eq!(joiner.push("", false, true).as_deref(), Some("word"));
+        assert_eq!(
+            joiner.push("Word again", true, true).as_deref(),
+            Some("Word again")
+        );
+    }
+
+    #[test]
+    fn failed_transcript_breaks_the_pending_boundary() {
+        let mut joiner = BoundaryTextJoiner::default();
+        assert_eq!(
+            joiner.push("first word", false, false).as_deref(),
+            Some("first")
+        );
+        assert_eq!(joiner.break_boundary().as_deref(), Some("word"));
+        assert_eq!(
+            joiner.push("Word again", true, true).as_deref(),
+            Some("Word again")
+        );
     }
 }

@@ -47,7 +47,7 @@ impl Default for Config {
             audio_device: String::new(),
             min_speech_ms: 300,
             trailing_silence_ms: 300,
-            segment_pause_ms: 300,
+            segment_pause_ms: 800,
             segment_max_ms: 30_000,
             injection: "auto".into(),
             indicator_style: IndicatorStyle::Neutral,
@@ -227,7 +227,7 @@ mod tests {
         assert_eq!(back.load_timeout_secs, 1800);
         assert_eq!(back.min_speech_ms, 300);
         assert_eq!(back.trailing_silence_ms, 300);
-        assert_eq!(back.segment_pause_ms, 300);
+        assert_eq!(back.segment_pause_ms, 800);
         assert_eq!(back.segment_max_ms, 30_000);
         assert!(back.quantized);
         assert_eq!(back.indicator_style, IndicatorStyle::Neutral);
