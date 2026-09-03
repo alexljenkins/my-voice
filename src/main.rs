@@ -6,6 +6,7 @@ mod autostart;
 mod config;
 mod download;
 mod hotkey;
+mod indicator;
 mod injector;
 mod keybind_capture;
 mod model_cache;
@@ -581,6 +582,7 @@ fn run_daemon(
     let (ui_tx, ui_rx) = mpsc::channel::<UiCommand>();
     let ui = ui::spawn(ui_tx);
     forward(ui_rx, daemon_tx.clone(), DaemonMsg::Ui);
+    let indicator = indicator::spawn(recorder.visual_signal());
 
     info!("ready — hold '{}' to record", config.hotkey);
     ui.set_state(TrayState::Ready);
@@ -657,6 +659,7 @@ fn run_daemon(
                                 } else {
                                     warn!("transcription queue remained full; stopping hold");
                                     recorder.cancel();
+                                    indicator.hide();
                                     hold.released = true;
                                     ui.set_state(TrayState::Error(
                                         "Transcription can't keep up".into(),
@@ -694,6 +697,10 @@ fn run_daemon(
                         ui.set_state(TrayState::Error("Couldn't start recording".into()));
                         continue;
                     }
+                    indicator.show(indicator::choose_style(
+                        config.indicator_style,
+                        next_hold_id,
+                    ));
                     // Kick the cold-start load now so it overlaps with speech;
                     // transcribe() later blocks on the same lock if it's not done.
                     let preload = Arc::clone(&cache);
@@ -723,6 +730,7 @@ fn run_daemon(
                     next_hold_id += 1;
                 }
                 (State::Recording(_), HotkeyEvent::Release) => {
+                    indicator.hide();
                     // PTT trailing buffer: catch the tail of the last word.
                     thread::sleep(trailing);
                     ui.set_state(TrayState::Transcribing);
@@ -744,6 +752,7 @@ fn run_daemon(
                 _ => {}
             },
             DaemonMsg::AudioFailed(e) => {
+                indicator.hide();
                 warn!("audio stream failed: {e}");
                 if let State::Recording(hold) = &mut state {
                     recorder.cancel();
@@ -926,7 +935,8 @@ fn run_daemon(
                 cmd @ (UiCommand::SetModel(_)
                 | UiCommand::SetAudioDevice(_)
                 | UiCommand::SetInjection(_)
-                | UiCommand::SetClipboardHotkey(_)),
+                | UiCommand::SetClipboardHotkey(_)
+                | UiCommand::SetIndicatorStyle(_)),
             ) => {
                 let mut updated = config.clone();
                 match cmd {
@@ -934,6 +944,7 @@ fn run_daemon(
                     UiCommand::SetAudioDevice(d) => updated.audio_device = d,
                     UiCommand::SetInjection(inj) => updated.injection = inj,
                     UiCommand::SetClipboardHotkey(b) => updated.clipboard_hotkey = b,
+                    UiCommand::SetIndicatorStyle(style) => updated.indicator_style = style,
                     _ => unreachable!(),
                 }
                 save_config(&updated, config_path.as_deref());
@@ -1030,7 +1041,8 @@ fn apply_reload(
     }
     if actions.recorder {
         match AudioRecorder::new(&new.audio_device) {
-            Ok(r) => {
+            Ok(mut r) => {
+                r.use_visual_signal(recorder.visual_signal());
                 *recorder = r;
                 register_audio_error_cb(recorder, daemon_tx);
             }
@@ -1118,6 +1130,7 @@ fn build_tray_menu(config: &Config, audio_devices: &[audio::AudioDevice]) -> Tra
         inject_unlock_hint,
         grab: config.grab,
         clipboard_hotkey: config.clipboard_hotkey,
+        indicator_style: config.indicator_style,
         start_at_login: autostart::is_enabled(),
     }
 }

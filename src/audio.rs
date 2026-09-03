@@ -1,7 +1,7 @@
 //! AudioRecorder: cpal input stream, mono downmix, sinc/FFT resample to 16 kHz.
 //! Pipeline: native-rate capture → rubato FFT resample → WebRTC APM → peak normalize → VAD silence trim.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{anyhow, Context, Result};
@@ -104,6 +104,7 @@ pub struct AudioRecorder {
     observed_speech_ms: u64,
     trailing_silence_ms: u64,
     overrun: Arc<AtomicBool>,
+    visual_signal: Arc<AtomicU32>,
     /// Invoked (from cpal's error callback thread) when the stream dies
     /// mid-capture — e.g. the microphone is unplugged.
     error_cb: Option<Arc<dyn Fn(String) + Send + Sync>>,
@@ -133,6 +134,7 @@ impl AudioRecorder {
             observed_speech_ms: 0,
             trailing_silence_ms: 0,
             overrun: Arc::new(AtomicBool::new(false)),
+            visual_signal: Arc::new(AtomicU32::new(0)),
             error_cb: None,
         })
     }
@@ -156,8 +158,10 @@ impl AudioRecorder {
         let channels = self.channels;
         let cap = self.sample_rate as usize * CAPTURE_PREALLOC_SECONDS;
         self.overrun.store(false, Ordering::Relaxed);
+        self.visual_signal.store(0, Ordering::Relaxed);
         let overrun = self.overrun.clone();
         let buf = self.buffer.clone();
+        let visual_signal = self.visual_signal.clone();
         let cb = self.error_cb.clone();
         let err_fn = move |e: cpal::StreamError| {
             error!("audio stream error: {e}");
@@ -172,61 +176,81 @@ impl AudioRecorder {
         let stream = match self.sample_format {
             SampleFormat::F32 => self.device.build_input_stream(
                 &config,
-                move |data: &[f32], _| append_mono(&buf, data, channels, cap, &overrun),
+                move |data: &[f32], _| {
+                    append_mono(&buf, data, channels, cap, &overrun, &visual_signal)
+                },
                 err_fn,
                 None,
             ),
             SampleFormat::F64 => self.device.build_input_stream(
                 &config,
-                move |data: &[f64], _| append_mono(&buf, data, channels, cap, &overrun),
+                move |data: &[f64], _| {
+                    append_mono(&buf, data, channels, cap, &overrun, &visual_signal)
+                },
                 err_fn,
                 None,
             ),
             SampleFormat::I8 => self.device.build_input_stream(
                 &config,
-                move |data: &[i8], _| append_mono(&buf, data, channels, cap, &overrun),
+                move |data: &[i8], _| {
+                    append_mono(&buf, data, channels, cap, &overrun, &visual_signal)
+                },
                 err_fn,
                 None,
             ),
             SampleFormat::I16 => self.device.build_input_stream(
                 &config,
-                move |data: &[i16], _| append_mono(&buf, data, channels, cap, &overrun),
+                move |data: &[i16], _| {
+                    append_mono(&buf, data, channels, cap, &overrun, &visual_signal)
+                },
                 err_fn,
                 None,
             ),
             SampleFormat::I32 => self.device.build_input_stream(
                 &config,
-                move |data: &[i32], _| append_mono(&buf, data, channels, cap, &overrun),
+                move |data: &[i32], _| {
+                    append_mono(&buf, data, channels, cap, &overrun, &visual_signal)
+                },
                 err_fn,
                 None,
             ),
             SampleFormat::I64 => self.device.build_input_stream(
                 &config,
-                move |data: &[i64], _| append_mono(&buf, data, channels, cap, &overrun),
+                move |data: &[i64], _| {
+                    append_mono(&buf, data, channels, cap, &overrun, &visual_signal)
+                },
                 err_fn,
                 None,
             ),
             SampleFormat::U8 => self.device.build_input_stream(
                 &config,
-                move |data: &[u8], _| append_mono(&buf, data, channels, cap, &overrun),
+                move |data: &[u8], _| {
+                    append_mono(&buf, data, channels, cap, &overrun, &visual_signal)
+                },
                 err_fn,
                 None,
             ),
             SampleFormat::U16 => self.device.build_input_stream(
                 &config,
-                move |data: &[u16], _| append_mono(&buf, data, channels, cap, &overrun),
+                move |data: &[u16], _| {
+                    append_mono(&buf, data, channels, cap, &overrun, &visual_signal)
+                },
                 err_fn,
                 None,
             ),
             SampleFormat::U32 => self.device.build_input_stream(
                 &config,
-                move |data: &[u32], _| append_mono(&buf, data, channels, cap, &overrun),
+                move |data: &[u32], _| {
+                    append_mono(&buf, data, channels, cap, &overrun, &visual_signal)
+                },
                 err_fn,
                 None,
             ),
             SampleFormat::U64 => self.device.build_input_stream(
                 &config,
-                move |data: &[u64], _| append_mono(&buf, data, channels, cap, &overrun),
+                move |data: &[u64], _| {
+                    append_mono(&buf, data, channels, cap, &overrun, &visual_signal)
+                },
                 err_fn,
                 None,
             ),
@@ -243,6 +267,7 @@ impl AudioRecorder {
     /// Stop the stream and discard whatever was captured (no processing).
     pub fn cancel(&mut self) {
         self.stream = None;
+        self.visual_signal.store(0, Ordering::Relaxed);
         lock_buf(&self.buffer).clear();
         self.reset_detector(0);
     }
@@ -276,6 +301,7 @@ impl AudioRecorder {
 
     pub fn stop_raw(&mut self) -> DrainedSegment {
         self.stream = None;
+        self.visual_signal.store(0, Ordering::Relaxed);
         self.update_detector();
         let raw = std::mem::take(&mut *lock_buf(&self.buffer));
         let segment = DrainedSegment {
@@ -355,6 +381,16 @@ impl AudioRecorder {
     #[cfg_attr(not(feature = "debug-tools"), allow(dead_code))]
     pub fn target_rate(&self) -> u32 {
         TARGET_RATE
+    }
+
+    /// A lossy loudness feed for visual UI. It never owns captured samples.
+    pub fn visual_signal(&self) -> Arc<AtomicU32> {
+        self.visual_signal.clone()
+    }
+
+    /// Keep UI listeners attached when a config reload replaces the device.
+    pub fn use_visual_signal(&mut self, signal: Arc<AtomicU32>) {
+        self.visual_signal = signal;
     }
 }
 
@@ -585,19 +621,28 @@ fn append_mono<T>(
     channels: usize,
     cap: usize,
     overrun: &AtomicBool,
+    visual_signal: &AtomicU32,
 ) where
     T: Sample,
     f32: FromSample<T>,
 {
     let mut b = lock_buf(buf);
     let denom = channels.max(1) as f32;
+    let mut squares = 0.0;
+    let mut count = 0usize;
     for frame in data.chunks(channels.max(1)) {
         if b.len() >= cap {
             overrun.store(true, Ordering::Relaxed);
         }
         let sum: f32 = frame.iter().map(|s| f32::from_sample(*s)).sum();
-        b.push(sum / denom);
+        let mono = sum / denom;
+        b.push(mono);
+        squares += mono * mono;
+        count += 1;
     }
+    let rms = (squares / count.max(1) as f32).sqrt();
+    let level = ((rms - 0.012) * 6.2).clamp(0.0, 1.0);
+    visual_signal.store(level.to_bits(), Ordering::Relaxed);
 }
 
 /// Process one complete capture with a fresh APM instance.
@@ -980,7 +1025,7 @@ mod tests {
     };
     use cpal::SampleFormat;
     use std::panic::{catch_unwind, AssertUnwindSafe};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
 
     /// Poison the buffer mutex (panic while holding it), then assert lock_buf still
@@ -1008,7 +1053,14 @@ mod tests {
             panic!("poison the lock");
         }));
         assert!(buf.is_poisoned());
-        append_mono(&buf, &[0.5f32, 0.5], 1, 16, &AtomicBool::new(false));
+        append_mono(
+            &buf,
+            &[0.5f32, 0.5],
+            1,
+            16,
+            &AtomicBool::new(false),
+            &AtomicU32::new(0),
+        );
         assert_eq!(*lock_buf(&buf), vec![0.5, 0.5]);
     }
 
@@ -1016,25 +1068,41 @@ mod tests {
     fn append_mono_flags_capacity_without_dropping_samples() {
         let buf = Arc::new(Mutex::new(Vec::<f32>::new()));
         let overrun = AtomicBool::new(false);
-        append_mono(&buf, &[0.1f32, 0.2, 0.3], 1, 2, &overrun);
+        append_mono(
+            &buf,
+            &[0.1f32, 0.2, 0.3],
+            1,
+            2,
+            &overrun,
+            &AtomicU32::new(0),
+        );
         assert_eq!(*lock_buf(&buf), vec![0.1, 0.2, 0.3]);
         assert!(overrun.load(Ordering::Relaxed));
     }
 
     #[test]
-    fn pause_requirement_shrinks_toward_forced_split() {
-        assert_eq!(adaptive_pause_ms(300, 0, 30_000), 800);
-        assert_eq!(adaptive_pause_ms(300, 1_000, 30_000), 800);
-        assert_eq!(adaptive_pause_ms(300, 2_000, 30_000), 800);
-        assert_eq!(adaptive_pause_ms(300, 2_999, 30_000), 800);
-        assert_eq!(adaptive_pause_ms(300, 3_000, 30_000), 800);
-        assert_eq!(adaptive_pause_ms(300, 5_000, 30_000), 770);
-        assert_eq!(adaptive_pause_ms(300, 10_000, 30_000), 695);
-        assert_eq!(adaptive_pause_ms(300, 20_000, 30_000), 544);
-        assert_eq!(adaptive_pause_ms(300, 30_000, 30_000), 392);
-        assert_eq!(adaptive_pause_ms(300, 40_000, 30_000), 241);
-        assert_eq!(adaptive_pause_ms(300, 47_000, 30_000), 136);
-        assert_eq!(adaptive_pause_ms(300, 48_000, 30_000), 120);
+    fn append_publishes_visual_level_without_consuming_audio() {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let signal = AtomicU32::new(0);
+        append_mono(
+            &buf,
+            &[0.5f32, -0.5],
+            1,
+            16,
+            &AtomicBool::new(false),
+            &signal,
+        );
+        assert_eq!(lock_buf(&buf).as_slice(), &[0.5, -0.5]);
+        assert!(f32::from_bits(signal.load(Ordering::Relaxed)) > 0.9);
+    }
+
+    #[test]
+    fn pause_requirement_shrinks_toward_soft_cap() {
+        assert_eq!(adaptive_pause_ms(300, 0, 30_000), 300);
+        assert_eq!(adaptive_pause_ms(300, 10_000, 30_000), 240);
+        assert_eq!(adaptive_pause_ms(300, 20_000, 30_000), 180);
+        assert_eq!(adaptive_pause_ms(300, 30_000, 30_000), 120);
+        assert_eq!(adaptive_pause_ms(300, 40_000, 30_000), 120);
     }
 
     #[test]

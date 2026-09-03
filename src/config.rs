@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::indicator::IndicatorStyle;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -25,6 +27,7 @@ pub struct Config {
     pub segment_pause_ms: u64,
     pub segment_max_ms: u64,
     pub injection: String,
+    pub indicator_style: IndicatorStyle,
     /// Whole-word, case-insensitive find→replace pairs applied last in
     /// post-processing — fixes proper nouns/jargon the model never learns.
     pub corrections: Vec<(String, String)>,
@@ -47,6 +50,7 @@ impl Default for Config {
             segment_pause_ms: 800,
             segment_max_ms: 30_000,
             injection: "auto".into(),
+            indicator_style: IndicatorStyle::Neutral,
             corrections: Vec::new(),
         }
     }
@@ -119,6 +123,7 @@ impl Config {
             "segment_pause_ms",
             "segment_max_ms",
             "injection",
+            "indicator_style",
             "corrections",
         ];
         if let Ok(value) = toml::from_str::<toml::Table>(raw) {
@@ -225,6 +230,14 @@ mod tests {
         assert_eq!(back.segment_pause_ms, 800);
         assert_eq!(back.segment_max_ms, 30_000);
         assert!(back.quantized);
+        assert_eq!(back.indicator_style, IndicatorStyle::Neutral);
+    }
+
+    #[test]
+    fn parses_indicator_style() {
+        let cfg: Config = toml::from_str("indicator_style = \"anxious\"").unwrap();
+        assert_eq!(cfg.indicator_style, IndicatorStyle::Anxious);
+        assert!(toml::from_str::<Config>("indicator_style = \"unknown\"").is_err());
     }
 
     #[test]
