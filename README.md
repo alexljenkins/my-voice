@@ -27,7 +27,7 @@ my-voice --download
 my-voice
 ```
 
-A microphone icon appears in the system tray. The default model download is about 345 MB.
+A microphone icon appears in the system tray. The default model download is about 64 MB.
 While you hold the recording key, a small orb at the bottom of the display reacts to your voice.
 
 <details>
@@ -79,7 +79,7 @@ If the overlay cannot start, dictation and the tray continue to work.
 The default file is `~/.config/my-voice/config.toml`. You only need this file when the defaults do not fit.
 
 ```toml
-model = "moonshine-streaming-small"
+model = "moonshine-base"
 model_dir = "~/.local/share/my-voice/models"
 quantized = true
 threads = 0
@@ -117,8 +117,7 @@ The default model is the best balance for most computers.
 | Model | Download | Use it when |
 |---|---:|---|
 | `moonshine-tiny` | 31 MB | The computer has little memory |
-| `moonshine-base` | 64 MB | You want a small download |
-| `moonshine-streaming-small` | 345 MB | You want the recommended model |
+| `moonshine-base` | 64 MB | You want the recommended model |
 | `moonshine-streaming-medium` | 566 MB | You want the best accuracy |
 
 All models run locally and support English only.
