@@ -1097,12 +1097,19 @@ mod tests {
     }
 
     #[test]
-    fn pause_requirement_shrinks_toward_soft_cap() {
-        assert_eq!(adaptive_pause_ms(300, 0, 30_000), 300);
-        assert_eq!(adaptive_pause_ms(300, 10_000, 30_000), 240);
-        assert_eq!(adaptive_pause_ms(300, 20_000, 30_000), 180);
-        assert_eq!(adaptive_pause_ms(300, 30_000, 30_000), 120);
-        assert_eq!(adaptive_pause_ms(300, 40_000, 30_000), 120);
+    fn pause_requirement_shrinks_toward_forced_split() {
+        assert_eq!(adaptive_pause_ms(300, 0, 30_000), 800);
+        assert_eq!(adaptive_pause_ms(300, 1_000, 30_000), 800);
+        assert_eq!(adaptive_pause_ms(300, 2_000, 30_000), 800);
+        assert_eq!(adaptive_pause_ms(300, 2_999, 30_000), 800);
+        assert_eq!(adaptive_pause_ms(300, 3_000, 30_000), 800);
+        assert_eq!(adaptive_pause_ms(300, 5_000, 30_000), 770);
+        assert_eq!(adaptive_pause_ms(300, 10_000, 30_000), 695);
+        assert_eq!(adaptive_pause_ms(300, 20_000, 30_000), 544);
+        assert_eq!(adaptive_pause_ms(300, 30_000, 30_000), 392);
+        assert_eq!(adaptive_pause_ms(300, 40_000, 30_000), 241);
+        assert_eq!(adaptive_pause_ms(300, 47_000, 30_000), 136);
+        assert_eq!(adaptive_pause_ms(300, 48_000, 30_000), 120);
     }
 
     #[test]

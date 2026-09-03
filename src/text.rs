@@ -279,7 +279,7 @@ mod tests {
         assert_eq!(pp("x\u{2060}y"), "xy"); // word joiner
         assert_eq!(pp("l\u{200E}r"), "lr"); // left-to-right mark
         assert_eq!(pp("tag\u{E0041}end"), "tagend"); // tag character
-        // A BOM that would otherwise survive the trim and corrupt injection.
+                                                     // A BOM that would otherwise survive the trim and corrupt injection.
         assert_eq!(pp("  \u{FEFF}ls "), "ls");
     }
 
