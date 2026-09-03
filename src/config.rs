@@ -33,7 +33,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            model: "moonshine-streaming-small".into(),
+            model: "moonshine-base".into(),
             model_dir: "~/.local/share/my-voice/models".into(),
             quantized: true,
             threads: 0,
@@ -218,7 +218,7 @@ mod tests {
         let cfg = Config::default();
         let toml = toml::to_string(&cfg).unwrap();
         let back: Config = toml::from_str(&toml).unwrap();
-        assert_eq!(back.model, "moonshine-streaming-small");
+        assert_eq!(back.model, "moonshine-base");
         assert_eq!(back.load_timeout_secs, 1800);
         assert_eq!(back.min_speech_ms, 300);
         assert_eq!(back.trailing_silence_ms, 300);
@@ -242,7 +242,7 @@ mod tests {
     fn partial_config_keeps_defaults() {
         let cfg: Config = toml::from_str("min_speech_ms = 500").unwrap();
         assert_eq!(cfg.min_speech_ms, 500);
-        assert_eq!(cfg.model, "moonshine-streaming-small"); // default preserved
+        assert_eq!(cfg.model, "moonshine-base"); // default preserved
     }
 
     #[test]
@@ -250,7 +250,7 @@ mod tests {
         // Wrong-type value on the DEFAULT path must not brick boot — use defaults.
         let cfg = Config::parse_or_default("min_speech_ms = \"loud\"", true).unwrap();
         assert_eq!(cfg.min_speech_ms, Config::default().min_speech_ms);
-        assert_eq!(cfg.model, "moonshine-streaming-small");
+        assert_eq!(cfg.model, "moonshine-base");
     }
 
     #[test]
@@ -262,7 +262,7 @@ mod tests {
     #[test]
     fn model_resolution_named() {
         let cfg = Config::default();
-        assert!(cfg.resolve_model().ends_with("moonshine-streaming-small"));
+        assert!(cfg.resolve_model().ends_with("moonshine-base"));
     }
 
     #[test]

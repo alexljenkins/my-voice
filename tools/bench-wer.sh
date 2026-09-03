@@ -24,7 +24,7 @@ CORES="${CORES:-1-6}"
 QUIET="${QUIET:-0.5}"                   # start only once 1-min loadavg is below this
 QUIET_TIMEOUT="${QUIET_TIMEOUT:-30}"    # ...or give up waiting after this many seconds
 RESULTS="${RESULTS:-tools/zz_results.txt}"
-MODELS="${MODELS:-moonshine-base:int8 moonshine-base:fp32 moonshine-streaming-small:int8}"
+MODELS="${MODELS:-moonshine-base:int8 moonshine-base:fp32 moonshine-streaming-medium:int8}"
 [[ -n "${MODEL:-}" ]] && MODELS="$MODEL"   # MODEL=<one> overrides the whole list
 
 BIN=./target/release/my-voice

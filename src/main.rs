@@ -974,9 +974,6 @@ fn apply_reload(
         let label: &str = match new.model.as_str() {
             "moonshine-tiny" => "Switched to moonshine-tiny. Fastest, smallest download.",
             "moonshine-base" => "Switched to moonshine-base. Good balance of speed and accuracy.",
-            "moonshine-streaming-small" => {
-                "Switched to moonshine-streaming-small. Best accuracy for most use cases."
-            }
             "moonshine-streaming-medium" => {
                 "Switched to moonshine-streaming-medium. Highest accuracy."
             }
@@ -1582,7 +1579,7 @@ mod tests {
                 (path.extension().and_then(|value| value.to_str()) == Some("wav")).then_some(path)
             })
             .collect();
-        assert_eq!(wav_files, [wav.clone()]);
+        assert_eq!(wav_files, std::slice::from_ref(&wav));
         assert!(wav
             .file_name()
             .unwrap()
@@ -1650,7 +1647,7 @@ mod tests {
     fn model_fields_rebuild_cache() {
         for new in [
             Config {
-                model: "moonshine-base".into(),
+                model: "moonshine-streaming-medium".into(),
                 ..cfg()
             },
             Config {
