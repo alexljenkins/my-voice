@@ -1,8 +1,7 @@
 //! Start-at-login via the XDG autostart spec: a `.desktop` entry in
 //! `~/.config/autostart/` is launched by the session at login. No root, no
-//! systemd unit — just a file we create or delete. macOS is a stub for now.
+//! systemd unit — just a file we create or delete.
 
-#[cfg(target_os = "linux")]
 mod imp {
     use std::path::PathBuf;
 
@@ -46,19 +45,6 @@ mod imp {
         }
         std::fs::write(&path, entry).with_context(|| format!("writing {}", path.display()))?;
         Ok(())
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-mod imp {
-    use anyhow::{bail, Result};
-
-    pub fn is_enabled() -> bool {
-        false
-    }
-
-    pub fn set_enabled(_on: bool) -> Result<()> {
-        bail!("start-at-login is not implemented on this platform")
     }
 }
 

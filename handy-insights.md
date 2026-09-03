@@ -107,11 +107,11 @@ The lens here is narrow: mine Handy's **Rust backend** for techniques that port 
 
 **Handy:** `is_microphone_access_denied()` string-matches "access is denied" / "permission denied" / "0x80070005" (recorder.rs:338-343), maps to a distinct error so the UI says "grant mic access" instead of a cryptic backend string; unit-tested.
 
-**my-voice today:** `AudioRecorder::new` failure (main.rs:363-373) fires a hardcoded "No microphone found" toast; the mid-capture path (main.rs:531-540) fires "Microphone disconnected". On macOS first run, a TCC mic-permission denial surfaces as a raw cpal error at these points and gets MISLABELED.
+**my-voice today:** `AudioRecorder::new` failure (main.rs:363-373) fires a hardcoded "No microphone found" toast; the mid-capture path (main.rs:531-540) fires "Microphone disconnected".
 
-**Change:** Add `notify::ErrorKind::MicPermissionDenied` (src/notify.rs:12-19) + a free `classify()` fn in audio.rs (string-match on "permission denied"/"access is denied"/"0x80070005"/TCC wording) with 2-3 `#[cfg(test)]` cases. Apply at TWO sites: (a) the `new()` Err arm (main.rs:363-373, where startup TCC denial lands — the proposal underweights this), and (b) the AudioFailed handler (main.rs:531-540). Do NOT port Handy's `std::io::ErrorKind` mapping layer — reuse the existing `notify::ErrorKind` enum.
+**Change:** Add `notify::ErrorKind::MicPermissionDenied` (src/notify.rs:12-19) and a free `classify()` function in audio.rs. Match Linux permission errors. Apply it at startup and in the `AudioFailed` handler.
 
-**Fit & red-team:** Pure string heuristic, no deps, English-text-only. Payoff is ~90% macOS (Linux PipeWire denial is rare and usually presents as no-device, already covered by NoMicrophone). String heuristics rot across OS/cpal versions, but the test cases bound that cheaply. Skip the parallel `is_no_input_device` classifier (select_device already returns a clear message).
+**Fit & red-team:** Linux PipeWire denial is rare and usually presents as no-device, which `NoMicrophone` already covers. Skip this until a Linux error needs classification.
 
 **Effort:** low
 
@@ -123,9 +123,9 @@ The lens here is narrow: mine Handy's **Rust backend** for techniques that port 
 
 **my-voice today:** Absent. Every CapsLock Release runs `handle_utterance` and injects (main.rs:474-512). A sneeze, wrong window, or changed mind types garbage with no escape.
 
-**Change:** Add `HotkeyEvent::Cancel`. In evdev `run_device` (linux.rs:415-450), emit Cancel when `active && ev.code()==Key::KEY_ESC.code()` (reusing the already-open event stream — no second grab, sidesteps Handy's Linux instability). macOS CGEvent tap can do the same. Handle `(State::Recording, Cancel)` in main.rs:455: call `recorder.cancel()` (already exists, used at main.rs:534), return to Idle WITHOUT transcribing, still honor `pending_reload`.
+**Change:** Add `HotkeyEvent::Cancel`. In evdev `run_device` (linux.rs:415-450), emit Cancel when `active && ev.code()==Key::KEY_ESC.code()`. Handle `(State::Recording, Cancel)` in main.rs:455 and discard the recording.
 
-**Fit & red-team:** Zero deps, async-free, reuses the open event stream. **Load-bearing caveat the proposal glosses:** the X11 `XGrabKey` fallback (run_x11, linux.rs:147-200) only receives events for the single grabbed keycode — it cannot see Escape without a second global grab (the exact fragility, AND it would steal Escape globally). So scope cancel to evdev + macOS; leave it unsupported on the X11 path (mirrors Handy disabling cancel on Linux). That asymmetry is why effort is low-to-medium, not flat low.
+**Fit & red-team:** The X11 fallback cannot see Escape without a second global grab. Keep cancel limited to evdev.
 
 **Effort:** low–medium
 
@@ -139,7 +139,7 @@ The lens here is narrow: mine Handy's **Rust backend** for techniques that port 
 
 **Change:** On entering Recording (main.rs:472), spawn a dedicated timer thread holding a `daemon_tx` clone (pattern already used for preload at main.rs:464-469) that sleeps a generous cap (~120s) then sends `DaemonMsg::Hotkey(HotkeyEvent::Release)`. Cancel/supersede on a real Release (generation counter or per-recording cancel flag so a stale watchdog can't fire). On fire: **DISCARD and return to Idle** — do NOT transcribe a 120s buffer (wasted CPU, likely noise injection).
 
-**Fit & red-team:** One Instant + a timer thread, no deps. Use the dedicated-thread variant (NOT "check elapsed on next event") so it covers the device-disconnect case where no further events arrive. Drop the "pairs with toggle mode" rationale unless #13 lands. The buffer-pinning/RSS angle is the load-bearing benefit; stuck-key UX is secondary. macOS path gets it free (watchdog lives in the daemon loop). Pairs with #13 (toggle mode needs this cap).
+**Fit & red-team:** One Instant and a timer thread cover device disconnects where no later event arrives. Pairs with #13 because toggle mode needs this cap.
 
 **Effort:** low
 
@@ -334,9 +334,7 @@ Rejected against my-voice's constraints (lean / offline / English / CPU / single
 - **Skip post-process on blank input** — no LLM exists, so Handy's failure mode can't occur; `post_process` is already a no-op on blank input.
 - **Optional local-LLM cleanup** — remote violates offline+async; localhost violates single-binary; rule-based caps/punct is a different feature that's a likely regression on a context-blind injector ("ls -la" → "Ls -la.").
 - **Per-shortcut behavior variants (struct + flag)** — no second behavior exists; the only realistic one (LLM post-process) is out of bounds; `post_process` is mandatory safety, not a toggle site.
-- **Apple Intelligence Swift FFI** — Apple-Silicon-only, breaks single-binary, zero Linux value, solves a non-goal (text prettification) my-voice rejects.
 - **Clipboard save/restore** — inseparable from synthesized Ctrl+V auto-paste, which my-voice rejects; both clipboard uses WANT to clobber (the text IS the deliverable).
-- **macOS chunked Unicode injection** — my-voice is already AHEAD (explicit 20-unit chunk + 1ms gap, macos.rs:41/104/124); nothing to port.
 - **enigo cross-platform crate** — my-voice injects TEXT (layout-immune), so enigo's layout-keycode value is categorically inapplicable; adopting it fattens the binary for zero benefit.
 - **RAII download-cleanup guard** — no shared in-flight flag to guard; the stateless background-thread + events model already prevents the bug class.
 - **Self-healing model registry** — realistic cases already self-heal (missing registry → auto background download main.rs:413; missing path → download then clear error); silently swapping to a different model violates config-as-source-of-truth.
@@ -350,7 +348,6 @@ Rejected against my-voice's constraints (lean / offline / English / CPU / single
 - **Remote-control socket + --toggle** — `--toggle` smuggles in a latch paradigm contradicting PTT; `--status` already proves the lean IPC answer is "read the lockfile pid." Salvage only Cancel — as a hotkey chord (#7), not a socket.
 - **SIGUSR1/2 trigger** — a signal can't express PTT hold; would require a whole new non-hold capture mode + self-pipe plumbing (most of what a socket needs anyway).
 - **Versioned settings migration via custom Deserializer** — `#[serde(default)]` + per-field defaults + `warn_unknown_keys` already handle add/remove/rename/missing; only a populated-field type change breaks (hypothetical), and the fix is then a localized custom Deserialize — no banking needed (YAGNI).
-- **Clamshell detection** — narrow macOS-only edge case already covered by setting `config.audio_device` explicitly; silent device-override is worse UX than the existing knob.
 - **Runtime-only --debug override** — my-voice's verbosity (-v/RUST_LOG) is already non-persisted, so the in-memory-override problem is structurally absent.
 - **Persistent SQLite history + WAV-on-disk** — pulls rusqlite + rusqlite_migration + chrono, default-on audio persistence is a privacy regression, and the feature is meaningless without a GUI list view. `--wav` + `--record DIR` already serve inspect + retry-from-audio.
 - **"Latest completed = skip-empty" semantics** — dependent footnote to #12; the empty case is already gated at main.rs:939-942, folded into #12 for free.
@@ -363,6 +360,6 @@ Rejected against my-voice's constraints (lean / offline / English / CPU / single
   - #10 (n-gram vocab), #17 (trailing space), any `SPEECH_RMS`/`PAD_MS` tuning — gate on a WER run over samples/ (baselines: streaming-small 0.154, streaming-medium 0.077) to confirm no regression.
 - **Decisions for Alex:**
   - #13 (toggle mode) MUST ship with #8 (max-recording cap) and a distinct "armed" tray state — toggle-without-cap is a worse bug than the problem it solves. Verify autorepeat doesn't false-toggle.
-  - #7 (cancel key) is evdev + macOS only; X11 XGrabKey can't see Escape without a fragile second grab. Accept the X11 gap.
+  - #7 (cancel key) is evdev-only; X11 XGrabKey cannot see Escape without a fragile second grab. Accept the X11 gap.
   - #14 (resume) vs #3/#9 — land the cheap correctness items (#3 byte-count, #9 atomic dir) first; resume trades the download module's dead-simple correctness for an edge-case bandwidth win.
 - **Brain-wiki notes worth capturing even without code:** the GPU FMA3/SIGILL footnote; the wl-copy forked-daemon-inherits-fds behavior; the load-bearing rule "context-blind injection forbids speculative auto-formatting" (the reason the whole LLM/caps/punct class is rejected).

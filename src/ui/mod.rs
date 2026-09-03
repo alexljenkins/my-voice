@@ -1,13 +1,9 @@
-//! Platform-neutral tray/menu-bar UI.
+//! Linux system tray UI.
 //!
 //! Two directions of flow, both over channels: the daemon pushes [`TrayState`]
 //! and [`TrayMenuState`] into the UI via [`UiHandle`], and the UI sends
 //! [`UiCommand`]s back to the daemon. One neutral model is rendered per
-//! backend, mirroring `hotkey/` and `injector/`. Linux renders via `ksni`
-//! (StatusNotifierItem over D-Bus, on its own thread — so the daemon keeps the
-//! main thread). macOS will render via `tray-icon` on the main thread (event
-//! loop owns it), which inverts the daemon onto a background thread — not yet
-//! implemented (see `ui/macos.rs`).
+//! backend. `ksni` renders a StatusNotifierItem over D-Bus on its own thread.
 
 use std::sync::mpsc::Sender;
 
@@ -97,27 +93,18 @@ pub enum UiCommand {
     Quit,
 }
 
-#[cfg(target_os = "linux")]
 mod linux;
-#[cfg(target_os = "macos")]
-mod macos;
 
 /// A live handle the daemon uses to push state into the tray. Cloneable so
 /// background threads (e.g. auto-download) can push state independently.
 pub struct UiHandle {
-    #[cfg(target_os = "linux")]
     inner: linux::LinuxUiHandle,
-    #[cfg(not(target_os = "linux"))]
-    _priv: (),
 }
 
 impl Clone for UiHandle {
     fn clone(&self) -> Self {
         Self {
-            #[cfg(target_os = "linux")]
             inner: self.inner.clone(),
-            #[cfg(not(target_os = "linux"))]
-            _priv: (),
         }
     }
 }
@@ -125,18 +112,12 @@ impl Clone for UiHandle {
 impl UiHandle {
     /// Update the tray icon + status line.
     pub fn set_state(&self, state: TrayState) {
-        #[cfg(target_os = "linux")]
         self.inner.set_state(state);
-        #[cfg(not(target_os = "linux"))]
-        let _ = state;
     }
 
     /// Push new config state into the tray so the menu reflects current settings.
     pub fn set_menu(&self, menu: TrayMenuState) {
-        #[cfg(target_os = "linux")]
         self.inner.set_menu(menu);
-        #[cfg(not(target_os = "linux"))]
-        let _ = menu;
     }
 }
 
@@ -145,20 +126,7 @@ impl UiHandle {
 /// is non-fatal: the daemon runs headless and re-attaches when a host appears
 /// (§6.4).
 pub fn spawn(cmd_tx: Sender<UiCommand>) -> UiHandle {
-    #[cfg(target_os = "linux")]
-    {
-        UiHandle {
-            inner: linux::spawn(cmd_tx),
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        macos::spawn(cmd_tx);
-        UiHandle { _priv: () }
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        let _ = cmd_tx;
-        UiHandle { _priv: () }
+    UiHandle {
+        inner: linux::spawn(cmd_tx),
     }
 }

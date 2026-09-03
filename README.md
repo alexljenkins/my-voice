@@ -1,6 +1,6 @@
 # my-voice
 
-Local push-to-talk dictation for Linux and macOS.
+Local push-to-talk dictation for Linux.
 
 Hold **CapsLock** and talk. my-voice types each completed phrase into the app you are using. It keeps listening while it transcribes.
 
@@ -12,8 +12,6 @@ Hold **CapsLock** and talk. my-voice types each completed phrase into the app yo
 ## Get started
 
 You need a microphone and [Rust](https://rustup.rs).
-
-### Linux
 
 ```bash
 # Install the Linux build tools
@@ -55,33 +53,7 @@ You can use clipboard mode from the tray if direct typing is unavailable.
 
 </details>
 
-### macOS
-
-```bash
-# Install Rust
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source "$HOME/.cargo/env"
-
-# Install and start my-voice
-cargo install --git https://github.com/alexljenkins/my-voice
-my-voice --download
-my-voice
-```
-
-macOS asks for Input Monitoring and Accessibility access. Enable both permissions for your terminal.
-
-<details>
-<summary>Find the macOS permissions</summary>
-
-1. Open **System Settings > Privacy & Security > Input Monitoring**.
-2. Enable access for your terminal.
-3. Open **System Settings > Privacy & Security > Accessibility**.
-4. Enable access for your terminal.
-5. Restart your terminal and run `my-voice` again.
-
-macOS does not have the tray menu yet. Use the configuration file for settings.
-
-</details>
+my-voice supports Linux only. macOS users can use [OpenSuperWhisper](https://github.com/Starmel/OpenSuperWhisper).
 
 ## Use it
 
@@ -95,7 +67,7 @@ Long dictation has no total duration limit. my-voice uses pauses to split speech
 
 ## Settings and help
 
-Linux users can change the microphone, model, typing mode, and startup behavior from the tray menu.
+You can change the microphone, model, typing mode, and startup behavior from the tray menu.
 
 <details>
 <summary>Configuration file</summary>

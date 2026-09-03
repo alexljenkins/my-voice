@@ -5,7 +5,7 @@ Both are push-to-talk / hotkey dictation tools that type transcribed speech into
 | | **my-voice** | **[FluidVoice](https://github.com/altic-dev/FluidVoice)** |
 |---|---|---|
 | **Languages** | English only (Moonshine models) | ~99 languages (Whisper), ~40 (Nemotron), 25 (Parakeed TDT v3), 14 (Cohere) — pick per language/latency need |
-| **Feels-like latency** | Push-to-talk: hold key, speak, release, then wait for one transcription pass. No feedback while speaking. | Live preview overlay — words appear on screen *as you speak* ("Parakeet Flash" aims for near-zero delay). Push-to-talk model also feels near-instant on Apple Silicon. |
+| **Feels-like latency** | Push-to-talk: hold key, speak, release, then wait for one transcription pass. No feedback while speaking. | Live preview overlay — words appear on screen *as you speak* ("Parakeet Flash" aims for near-zero delay). |
 | **Model sizes / footprint** | 31 MB–566 MB (default 345 MB). Smallest tier (~31 MB) targets weak CPUs. | 250 MB–2.9 GB per speech model, +3.5 GB optional for the "Fluid Intelligence" local AI enhancer. Materially heavier disk/RAM budget. |
 | **Post-processing / AI enhancement** | None — raw transcript only, plus a static find/replace `corrections` list in config. | Optional AI rewrite/formatting layer (cloud: OpenAI/Groq, or local "Fluid Intelligence"), "Write Mode" to rewrite selected text in place, "Command Mode" to trigger app actions by voice. |
 | **Extra features** | Clipboard-paste mode, multiple text-injection backends for Wayland/X11 compatibility, corrections list. | Audio history w/ export, per-app prompt profiles, usage stats, notch-aware overlay sizing, auto-update channel. |
