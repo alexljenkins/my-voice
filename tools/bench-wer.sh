@@ -10,7 +10,9 @@
 # Segmented accuracy runs separately because each CLI process owns one model.
 #
 # Output (terminal + $RESULTS): a per-model table (one row per sample, then an
-# AGGREGATE row) and a final cross-model SUMMARY table. $RESULTS is overwritten.
+# AGGREGATE row) and a final cross-model SUMMARY table. $RESULTS also includes
+# the reference and both transcripts for each sample. Pipes mark repeated audio
+# in the segmented diagnostic transcript. $RESULTS is overwritten.
 #
 # Usage:   ./tools/bench-wer.sh
 # Env:     ITERS=5  CORES=1-6  QUIET=0.5  QUIET_TIMEOUT=30  RESULTS=tools/zz_results.txt
@@ -50,9 +52,9 @@ if [[ -z "${SKIP_GOVERNOR:-}" && "$orig_gov" != "performance" && "$orig_gov" != 
     fi
 fi
 
-cfg="$(mktemp --suffix=.toml)"; tf="$(mktemp)"; errf="$(mktemp)"; segerrf="$(mktemp)"
+cfg="$(mktemp --suffix=.toml)"; tf="$(mktemp)"; errf="$(mktemp)"; segerrf="$(mktemp)"; transcriptf="$(mktemp)"
 cleanup() {
-    rm -f "$cfg" "$tf" "$errf" "$segerrf"
+    rm -f "$cfg" "$tf" "$errf" "$segerrf" "$transcriptf"
     [[ -n "${restore_gov:-}" ]] && sudo cpupower frequency-set -g "$orig_gov" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -150,6 +152,7 @@ for variant in $MODELS; do
     say ""
     say "── $label ──"
     sayf "$ROW_H" sample audio enc dec RTF RSS CPU WER strict segWER segStrict
+    : > "$transcriptf"
 
     sum_enc=0; sum_dec=0; total_audio=0; max_rss=0; max_cpu=0
     tne=0; trn=0; tse=0; trs=0; stne=0; strn=0; stse=0; strs=0
@@ -165,6 +168,12 @@ for variant in $MODELS; do
         # One run: stdout → hypothesis text; stderr → timings/RSS; $tf → CPU%.
         hyp="$("${TIME[@]}" "${PIN[@]}" "$BIN" -v --config "$cfg" --bench-iters "$ITERS" --wav "$wav" 2>"$errf")"
         seg_hyp="$("${PIN[@]}" "$BIN" -v --config "$cfg" --wav "$wav" --segmented 2>"$segerrf")"
+        marked_line="$(grep -F 'segmented transcript marked_transcript=' "$segerrf" | tail -1 || true)"
+        if [[ -z "$marked_line" ]]; then
+            echo "  $file: FAILED — no marked segmented transcript; rebuild with debug-tools" >&2
+            exit 1
+        fi
+        marked_seg_hyp="${marked_line#*segmented transcript marked_transcript=}"
         grep 'segment boundary' "$segerrf" >&2 || true
         mapfile -t encs < <(grep -oE 'encode [0-9]+' "$errf" | grep -oE '[0-9]+')
         mapfile -t decs < <(grep -oE 'decode [0-9]+' "$errf" | grep -oE '[0-9]+')
@@ -189,6 +198,7 @@ for variant in $MODELS; do
         mb="$(awk "BEGIN{printf \"%.0f\", $rss/1024}")"
 
         sayf "$ROW_F" "$file" "$audio" "$me" "$md" "$rtf" "$mb" "${cpu:-0}" "$wer" "$strict" "$seg_wer" "$seg_strict"
+        printf '%s\n%s\n%s\n%s\n\n' "$file" "$ref" "$hyp" "$marked_seg_hyp" >> "$transcriptf"
     done < "$EXPECTED"
 
     agg_rtf="$(awk "BEGIN{printf \"%.3f\", ($sum_enc+$sum_dec)/1000/($total_audio>0?$total_audio:0.001)}")"
@@ -199,6 +209,8 @@ for variant in $MODELS; do
     mb="$(awk "BEGIN{printf \"%.0f\", $max_rss/1024}")"
     say "  ----------------------------------------------------------------------------"
     sayf "$ROW_F" "AGGREGATE" "$total_audio" "$sum_enc" "$sum_dec" "$agg_rtf" "$mb" "$max_cpu" "$agg_wer" "$agg_strict" "$agg_seg_wer" "$agg_seg_strict"
+    printf '\n── TRANSCRIPTS: %s ──\n' "$label" >> "$RESULTS"
+    cat "$transcriptf" >> "$RESULTS"
 
     s_name+=("$label"); s_rss+=("$mb"); s_encdec+=("$(( sum_enc + sum_dec ))")
     s_rtf+=("$agg_rtf"); s_wer+=("$agg_wer"); s_strict+=("$agg_strict")

@@ -273,6 +273,7 @@ fn run_wav(config: &Config, path: &std::path::Path, iters: usize, segmented: boo
     let mut transcriber = transcriber::create(config)?;
     let mut text = String::new();
     if segmented {
+        let mut marked_text = String::new();
         let segments = audio::segment_samples(
             &mono,
             spec.sample_rate,
@@ -296,8 +297,10 @@ fn run_wav(config: &Config, path: &std::path::Path, iters: usize, segmented: boo
             .sum::<u64>();
         for _ in 0..iters {
             text.clear();
+            marked_text.clear();
             let mut audio_processor = audio::CaptureProcessor::new(16_000);
             let mut text_joiner = BoundaryTextJoiner::default();
+            let mut marked_text_joiner = BoundaryTextJoiner::with_overlap_markers();
             for timed in &segments {
                 let resampled = audio::resample(&timed.segment.raw, timed.segment.raw_rate, 16_000);
                 let overlap_samples = audio::resampled_sample_count(
@@ -311,6 +314,9 @@ fn run_wav(config: &Config, path: &std::path::Path, iters: usize, segmented: boo
                     if let Some(chunk) = text_joiner.break_boundary() {
                         append_joined(&mut text, &chunk);
                     }
+                    if let Some(chunk) = marked_text_joiner.break_boundary() {
+                        append_joined(&mut marked_text, &chunk);
+                    }
                     continue;
                 }
                 let raw_text = match transcriber.transcribe(&processed) {
@@ -318,6 +324,9 @@ fn run_wav(config: &Config, path: &std::path::Path, iters: usize, segmented: boo
                     Err(error) => {
                         if let Some(chunk) = text_joiner.break_boundary() {
                             append_joined(&mut text, &chunk);
+                        }
+                        if let Some(chunk) = marked_text_joiner.break_boundary() {
+                            append_joined(&mut marked_text, &chunk);
                         }
                         warn!("segment transcription failed: {error:#}");
                         continue;
@@ -328,6 +337,9 @@ fn run_wav(config: &Config, path: &std::path::Path, iters: usize, segmented: boo
                     if let Some(chunk) = text_joiner.break_boundary() {
                         append_joined(&mut text, &chunk);
                     }
+                    if let Some(chunk) = marked_text_joiner.break_boundary() {
+                        append_joined(&mut marked_text, &chunk);
+                    }
                     continue;
                 }
                 if let Some(chunk) = text_joiner.push(
@@ -337,11 +349,20 @@ fn run_wav(config: &Config, path: &std::path::Path, iters: usize, segmented: boo
                 ) {
                     append_joined(&mut text, &chunk);
                 }
+                if let Some(chunk) = marked_text_joiner.push(
+                    &segment_text,
+                    timed.segment.reason == audio::DrainReason::Release,
+                    timed.segment.overlap_samples > 0,
+                ) {
+                    append_joined(&mut marked_text, &chunk);
+                }
             }
         }
         if observed_speech_ms < config.min_speech_ms {
             text.clear();
+            marked_text.clear();
         }
+        info!(marked_transcript = %marked_text, "segmented transcript");
     } else {
         let samples = samples
             .as_deref()

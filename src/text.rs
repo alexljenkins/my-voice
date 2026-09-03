@@ -31,9 +31,17 @@ pub fn post_process(s: &str, corrections: &[(String, String)]) -> String {
 #[derive(Debug, Default)]
 pub struct BoundaryTextJoiner {
     pending_word: Option<String>,
+    mark_audio_overlaps: bool,
 }
 
 impl BoundaryTextJoiner {
+    pub fn with_overlap_markers() -> Self {
+        Self {
+            pending_word: None,
+            mark_audio_overlaps: true,
+        }
+    }
+
     pub fn push(
         &mut self,
         text: &str,
@@ -43,7 +51,12 @@ impl BoundaryTextJoiner {
         let incoming = text.trim();
         let resolved = match self.pending_word.take() {
             Some(pending) if incoming.is_empty() => return Some(pending),
-            Some(pending) => resolve_boundary(&pending, incoming, has_audio_overlap),
+            Some(pending) => resolve_boundary(
+                &pending,
+                incoming,
+                has_audio_overlap,
+                self.mark_audio_overlaps,
+            ),
             None => incoming.to_string(),
         };
 
@@ -67,12 +80,27 @@ impl BoundaryTextJoiner {
     }
 }
 
-fn resolve_boundary(left: &str, right: &str, has_audio_overlap: bool) -> String {
+fn resolve_boundary(
+    left: &str,
+    right: &str,
+    has_audio_overlap: bool,
+    mark_audio_overlap: bool,
+) -> String {
     let Some((right_word, right_core_end)) = first_word(right) else {
+        if has_audio_overlap && mark_audio_overlap {
+            return join_with_space(&format!("| {left} |"), right);
+        }
         return join_with_space(left, right);
     };
-    if !has_audio_overlap || normalize_word(left) != normalize_word(right_word) {
+    if !has_audio_overlap {
         return join_with_space(left, right);
+    }
+    if normalize_word(left) != normalize_word(right_word) {
+        return if mark_audio_overlap {
+            join_with_space(&format!("| {left} |"), right)
+        } else {
+            join_with_space(left, right)
+        };
     }
 
     let left_core_end = left
@@ -80,6 +108,9 @@ fn resolve_boundary(left: &str, right: &str, has_audio_overlap: bool) -> String 
         .rfind(|(_, character)| character.is_alphanumeric())
         .map(|(index, character)| index + character.len_utf8())
         .unwrap_or(left.len());
+    if mark_audio_overlap {
+        return format!("| {} |{}", &left[..left_core_end], &right[right_core_end..]);
+    }
     let mut joined = String::with_capacity(left_core_end + right.len() - right_core_end);
     joined.push_str(&left[..left_core_end]);
     joined.push_str(&right[right_core_end..]);
@@ -327,6 +358,42 @@ mod tests {
         assert_eq!(
             joiner.push("someone helped", true, true).as_deref(),
             Some("Someone helped")
+        );
+    }
+
+    #[test]
+    fn diagnostic_join_marks_each_confirmed_audio_overlap() {
+        let mut joiner = BoundaryTextJoiner::with_overlap_markers();
+        let mut text = String::new();
+        for chunk in [
+            joiner.push("So happy. Someone...", false, false),
+            joiner.push("someone helped another", false, true),
+            joiner.push("Another person arrived.", true, true),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(&chunk);
+        }
+        assert_eq!(
+            text,
+            "So happy. | Someone | helped | another | person arrived."
+        );
+    }
+
+    #[test]
+    fn diagnostic_join_marks_an_overlap_mismatch_without_merging_it() {
+        let mut joiner = BoundaryTextJoiner::with_overlap_markers();
+        assert_eq!(
+            joiner.push("hello world.", false, false).as_deref(),
+            Some("hello")
+        );
+        assert_eq!(
+            joiner.push("Different start.", true, true).as_deref(),
+            Some("| world. | Different start.")
         );
     }
 
