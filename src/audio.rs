@@ -1,7 +1,7 @@
 //! AudioRecorder: cpal input stream, mono downmix, sinc/FFT resample to 16 kHz.
 //! Pipeline: native-rate capture → rubato FFT resample → WebRTC APM → peak normalize → VAD silence trim.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{anyhow, Context, Result};
@@ -17,22 +17,33 @@ const RAW_WINDOW_MS: u64 = 20;
 const RAW_SPEECH_RMS: f32 = 0.008;
 const FORCE_SPLIT_AFTER_SOFT_MS: u64 = 18_000;
 const MIN_SEGMENT_PAUSE_MS: u64 = 120;
+const EARLY_SEGMENT_MS: u64 = 3_000;
+const EARLY_PAUSE_MS: u64 = 800;
+const OVERLAP_SEARCH_MS: u64 = 2_000;
+const OVERLAP_PAUSE_MS: u64 = 40;
 
 fn force_split_ms(soft_max_ms: u64) -> u64 {
     soft_max_ms.saturating_add(FORCE_SPLIT_AFTER_SOFT_MS)
 }
 
-/// Reduce the pause needed to close a segment as it approaches the soft cap.
-/// A fresh segment waits for a natural pause. At the soft cap, even a short
-/// hesitation closes it. Continuous speech gets another 18 seconds before a
-/// forced split.
+/// Keep the early pause threshold through the first 3 seconds, then reduce it
+/// linearly until the forced split. This avoids both tiny model inputs and a
+/// sudden threshold change at 3 seconds.
 fn adaptive_pause_ms(initial_pause_ms: u64, duration_ms: u64, soft_max_ms: u64) -> u64 {
-    let initial = initial_pause_ms.max(MIN_SEGMENT_PAUSE_MS);
-    if soft_max_ms == 0 || duration_ms >= soft_max_ms {
+    if soft_max_ms == 0 {
         return MIN_SEGMENT_PAUSE_MS;
     }
-    let reduction =
-        (initial - MIN_SEGMENT_PAUSE_MS) as u128 * duration_ms as u128 / soft_max_ms as u128;
+    let initial = initial_pause_ms.max(EARLY_PAUSE_MS);
+    if duration_ms <= EARLY_SEGMENT_MS {
+        return initial;
+    }
+    let forced_split_ms = force_split_ms(soft_max_ms);
+    if duration_ms >= forced_split_ms {
+        return MIN_SEGMENT_PAUSE_MS;
+    }
+    let ramp_ms = forced_split_ms - EARLY_SEGMENT_MS;
+    let elapsed_ms = duration_ms - EARLY_SEGMENT_MS;
+    let reduction = (initial - MIN_SEGMENT_PAUSE_MS) as u128 * elapsed_ms as u128 / ramp_ms as u128;
     initial - reduction as u64
 }
 
@@ -71,6 +82,14 @@ pub struct DrainedSegment {
     pub raw_rate: u32,
     pub observed_speech_ms: u64,
     pub reason: DrainReason,
+    /// Raw prefix copied from the previous segment for boundary context.
+    pub overlap_samples: usize,
+}
+
+#[cfg(feature = "debug-tools")]
+pub struct TimedSegment {
+    pub segment: DrainedSegment,
+    pub boundary_sample: usize,
 }
 
 pub struct AudioRecorder {
@@ -81,9 +100,11 @@ pub struct AudioRecorder {
     buffer: Arc<Mutex<Vec<f32>>>,
     stream: Option<cpal::Stream>,
     detector_pos: usize,
+    overlap_samples: usize,
     observed_speech_ms: u64,
     trailing_silence_ms: u64,
     overrun: Arc<AtomicBool>,
+    visual_signal: Arc<AtomicU32>,
     /// Invoked (from cpal's error callback thread) when the stream dies
     /// mid-capture — e.g. the microphone is unplugged.
     error_cb: Option<Arc<dyn Fn(String) + Send + Sync>>,
@@ -109,9 +130,11 @@ impl AudioRecorder {
             buffer: Arc::new(Mutex::new(Vec::with_capacity(cap))),
             stream: None,
             detector_pos: 0,
+            overlap_samples: 0,
             observed_speech_ms: 0,
             trailing_silence_ms: 0,
             overrun: Arc::new(AtomicBool::new(false)),
+            visual_signal: Arc::new(AtomicU32::new(0)),
             error_cb: None,
         })
     }
@@ -125,7 +148,7 @@ impl AudioRecorder {
     /// Open the input stream and begin appending mono samples to the buffer.
     pub fn start(&mut self) -> Result<()> {
         lock_buf(&self.buffer).clear();
-        self.reset_detector();
+        self.reset_detector(0);
 
         let config = cpal::StreamConfig {
             channels: self.channels as u16,
@@ -135,8 +158,10 @@ impl AudioRecorder {
         let channels = self.channels;
         let cap = self.sample_rate as usize * CAPTURE_PREALLOC_SECONDS;
         self.overrun.store(false, Ordering::Relaxed);
+        self.visual_signal.store(0, Ordering::Relaxed);
         let overrun = self.overrun.clone();
         let buf = self.buffer.clone();
+        let visual_signal = self.visual_signal.clone();
         let cb = self.error_cb.clone();
         let err_fn = move |e: cpal::StreamError| {
             error!("audio stream error: {e}");
@@ -151,61 +176,81 @@ impl AudioRecorder {
         let stream = match self.sample_format {
             SampleFormat::F32 => self.device.build_input_stream(
                 &config,
-                move |data: &[f32], _| append_mono(&buf, data, channels, cap, &overrun),
+                move |data: &[f32], _| {
+                    append_mono(&buf, data, channels, cap, &overrun, &visual_signal)
+                },
                 err_fn,
                 None,
             ),
             SampleFormat::F64 => self.device.build_input_stream(
                 &config,
-                move |data: &[f64], _| append_mono(&buf, data, channels, cap, &overrun),
+                move |data: &[f64], _| {
+                    append_mono(&buf, data, channels, cap, &overrun, &visual_signal)
+                },
                 err_fn,
                 None,
             ),
             SampleFormat::I8 => self.device.build_input_stream(
                 &config,
-                move |data: &[i8], _| append_mono(&buf, data, channels, cap, &overrun),
+                move |data: &[i8], _| {
+                    append_mono(&buf, data, channels, cap, &overrun, &visual_signal)
+                },
                 err_fn,
                 None,
             ),
             SampleFormat::I16 => self.device.build_input_stream(
                 &config,
-                move |data: &[i16], _| append_mono(&buf, data, channels, cap, &overrun),
+                move |data: &[i16], _| {
+                    append_mono(&buf, data, channels, cap, &overrun, &visual_signal)
+                },
                 err_fn,
                 None,
             ),
             SampleFormat::I32 => self.device.build_input_stream(
                 &config,
-                move |data: &[i32], _| append_mono(&buf, data, channels, cap, &overrun),
+                move |data: &[i32], _| {
+                    append_mono(&buf, data, channels, cap, &overrun, &visual_signal)
+                },
                 err_fn,
                 None,
             ),
             SampleFormat::I64 => self.device.build_input_stream(
                 &config,
-                move |data: &[i64], _| append_mono(&buf, data, channels, cap, &overrun),
+                move |data: &[i64], _| {
+                    append_mono(&buf, data, channels, cap, &overrun, &visual_signal)
+                },
                 err_fn,
                 None,
             ),
             SampleFormat::U8 => self.device.build_input_stream(
                 &config,
-                move |data: &[u8], _| append_mono(&buf, data, channels, cap, &overrun),
+                move |data: &[u8], _| {
+                    append_mono(&buf, data, channels, cap, &overrun, &visual_signal)
+                },
                 err_fn,
                 None,
             ),
             SampleFormat::U16 => self.device.build_input_stream(
                 &config,
-                move |data: &[u16], _| append_mono(&buf, data, channels, cap, &overrun),
+                move |data: &[u16], _| {
+                    append_mono(&buf, data, channels, cap, &overrun, &visual_signal)
+                },
                 err_fn,
                 None,
             ),
             SampleFormat::U32 => self.device.build_input_stream(
                 &config,
-                move |data: &[u32], _| append_mono(&buf, data, channels, cap, &overrun),
+                move |data: &[u32], _| {
+                    append_mono(&buf, data, channels, cap, &overrun, &visual_signal)
+                },
                 err_fn,
                 None,
             ),
             SampleFormat::U64 => self.device.build_input_stream(
                 &config,
-                move |data: &[u64], _| append_mono(&buf, data, channels, cap, &overrun),
+                move |data: &[u64], _| {
+                    append_mono(&buf, data, channels, cap, &overrun, &visual_signal)
+                },
                 err_fn,
                 None,
             ),
@@ -222,8 +267,9 @@ impl AudioRecorder {
     /// Stop the stream and discard whatever was captured (no processing).
     pub fn cancel(&mut self) {
         self.stream = None;
+        self.visual_signal.store(0, Ordering::Relaxed);
         lock_buf(&self.buffer).clear();
-        self.reset_detector();
+        self.reset_detector(0);
     }
 
     /// Stop the stream and return 16 kHz mono f32 samples in [-1, 1].
@@ -255,6 +301,7 @@ impl AudioRecorder {
 
     pub fn stop_raw(&mut self) -> DrainedSegment {
         self.stream = None;
+        self.visual_signal.store(0, Ordering::Relaxed);
         self.update_detector();
         let raw = std::mem::take(&mut *lock_buf(&self.buffer));
         let segment = DrainedSegment {
@@ -262,15 +309,17 @@ impl AudioRecorder {
             raw_rate: self.sample_rate,
             observed_speech_ms: self.observed_speech_ms,
             reason: DrainReason::Release,
+            overlap_samples: self.overlap_samples,
         };
-        self.reset_detector();
+        self.reset_detector(0);
         segment
     }
 
     pub fn try_drain_segment(&mut self, pause_ms: u64, max_ms: u64) -> Option<DrainedSegment> {
         self.update_detector();
         let len = lock_buf(&self.buffer).len();
-        let duration_ms = len as u64 * 1000 / self.sample_rate as u64;
+        let new_samples = len.saturating_sub(self.overlap_samples);
+        let duration_ms = new_samples as u64 * 1000 / self.sample_rate as u64;
         let emergency = self.overrun.swap(false, Ordering::Relaxed);
         let reason = segment_drain_reason(
             duration_ms,
@@ -286,9 +335,18 @@ impl AudioRecorder {
                 "capture poll stalled beyond emergency capacity; forcing drain"
             );
         }
+        let prior_overlap_samples = self.overlap_samples;
         let raw = std::mem::take(&mut *lock_buf(&self.buffer));
+        let mut next_buffer = boundary_overlap_start(&raw, self.sample_rate)
+            .map(|start| raw[start..].to_vec())
+            .unwrap_or_default();
+        let next_overlap_samples = next_buffer.len();
+        let mut buffer = lock_buf(&self.buffer);
+        next_buffer.append(&mut *buffer);
+        *buffer = next_buffer;
+        drop(buffer);
         let speech = self.observed_speech_ms;
-        self.reset_detector();
+        self.reset_detector(next_overlap_samples);
         if reason == DrainReason::MaxDuration && speech == 0 {
             debug!(duration_ms, "discarded silent maximum-duration segment");
             return None;
@@ -298,27 +356,24 @@ impl AudioRecorder {
             raw_rate: self.sample_rate,
             observed_speech_ms: speech,
             reason,
+            overlap_samples: prior_overlap_samples,
         })
     }
 
     fn update_detector(&mut self) {
         let b = lock_buf(&self.buffer);
-        let window = (self.sample_rate as u64 * RAW_WINDOW_MS / 1000) as usize;
-        while self.detector_pos + window <= b.len() {
-            let w = &b[self.detector_pos..self.detector_pos + window];
-            let rms = (w.iter().map(|s| s * s).sum::<f32>() / w.len() as f32).sqrt();
-            if rms >= RAW_SPEECH_RMS {
-                self.observed_speech_ms += RAW_WINDOW_MS;
-                self.trailing_silence_ms = 0;
-            } else if self.observed_speech_ms > 0 {
-                self.trailing_silence_ms += RAW_WINDOW_MS;
-            }
-            self.detector_pos += window;
-        }
+        update_segment_detector(
+            &b,
+            self.sample_rate,
+            &mut self.detector_pos,
+            &mut self.observed_speech_ms,
+            &mut self.trailing_silence_ms,
+        );
     }
 
-    fn reset_detector(&mut self) {
-        self.detector_pos = 0;
+    fn reset_detector(&mut self, overlap_samples: usize) {
+        self.detector_pos = overlap_samples;
+        self.overlap_samples = overlap_samples;
         self.observed_speech_ms = 0;
         self.trailing_silence_ms = 0;
     }
@@ -327,6 +382,160 @@ impl AudioRecorder {
     pub fn target_rate(&self) -> u32 {
         TARGET_RATE
     }
+
+    /// A lossy loudness feed for visual UI. It never owns captured samples.
+    pub fn visual_signal(&self) -> Arc<AtomicU32> {
+        self.visual_signal.clone()
+    }
+
+    /// Keep UI listeners attached when a config reload replaces the device.
+    pub fn use_visual_signal(&mut self, signal: Arc<AtomicU32>) {
+        self.visual_signal = signal;
+    }
+}
+
+/// Find the most recent raw-audio pause before the final spoken word.
+///
+/// The search only examines a bounded tail. If continuous speech contains no
+/// suitable pause, the next segment starts without overlap.
+fn boundary_overlap_start(samples: &[f32], sample_rate: u32) -> Option<usize> {
+    let window = (sample_rate as u64 * RAW_WINDOW_MS / 1000) as usize;
+    let pause_windows = OVERLAP_PAUSE_MS.div_ceil(RAW_WINDOW_MS) as usize;
+    let search_samples = (sample_rate as u64 * OVERLAP_SEARCH_MS / 1000) as usize;
+    if window == 0 || samples.len() < window {
+        return None;
+    }
+
+    let search_start = samples.len().saturating_sub(search_samples);
+    let windows: Vec<bool> = samples[search_start..]
+        .chunks_exact(window)
+        .map(|chunk| {
+            let rms = (chunk.iter().map(|sample| sample * sample).sum::<f32>()
+                / chunk.len() as f32)
+                .sqrt();
+            rms >= RAW_SPEECH_RMS
+        })
+        .collect();
+    let final_speech = windows.iter().rposition(|&speech| speech)?;
+    if final_speech == 0 {
+        return None;
+    }
+
+    let mut cursor = final_speech;
+    while cursor > 0 {
+        cursor -= 1;
+        if windows[cursor] {
+            continue;
+        }
+        let pause_end = cursor + 1;
+        while cursor > 0 && !windows[cursor - 1] {
+            cursor -= 1;
+        }
+        if pause_end - cursor >= pause_windows {
+            return Some(search_start + cursor * window);
+        }
+    }
+    None
+}
+
+fn update_segment_detector(
+    samples: &[f32],
+    sample_rate: u32,
+    detector_pos: &mut usize,
+    observed_speech_ms: &mut u64,
+    trailing_silence_ms: &mut u64,
+) {
+    let window = (sample_rate as u64 * RAW_WINDOW_MS / 1000) as usize;
+    while *detector_pos + window <= samples.len() {
+        let w = &samples[*detector_pos..*detector_pos + window];
+        let rms = (w.iter().map(|s| s * s).sum::<f32>() / w.len() as f32).sqrt();
+        if rms >= RAW_SPEECH_RMS {
+            *observed_speech_ms += RAW_WINDOW_MS;
+            *trailing_silence_ms = 0;
+        } else if *observed_speech_ms > 0 {
+            *trailing_silence_ms += RAW_WINDOW_MS;
+        }
+        *detector_pos += window;
+    }
+}
+
+/// Split fixed audio at the same 200 ms poll points as the daemon.
+/// The detector uses sample counts because a WAV file has no wall clock.
+#[cfg(feature = "debug-tools")]
+pub fn segment_samples(
+    samples: &[f32],
+    sample_rate: u32,
+    pause_ms: u64,
+    max_ms: u64,
+) -> Vec<TimedSegment> {
+    const POLL_MS: usize = 200;
+
+    let poll_samples = sample_rate as usize * POLL_MS / 1000;
+    let mut segments = Vec::new();
+    let mut buffer = Vec::new();
+    let mut detector_pos = 0;
+    let mut observed_speech_ms = 0;
+    let mut trailing_silence_ms = 0;
+    let mut overlap_samples = 0;
+    let mut consumed = 0;
+
+    for chunk in samples.chunks(poll_samples.max(1)) {
+        buffer.extend_from_slice(chunk);
+        consumed += chunk.len();
+        update_segment_detector(
+            &buffer,
+            sample_rate,
+            &mut detector_pos,
+            &mut observed_speech_ms,
+            &mut trailing_silence_ms,
+        );
+        let new_samples = buffer.len().saturating_sub(overlap_samples);
+        let duration_ms = new_samples as u64 * 1000 / sample_rate as u64;
+        let Some(reason) = segment_drain_reason(
+            duration_ms,
+            observed_speech_ms,
+            trailing_silence_ms,
+            pause_ms,
+            max_ms,
+            false,
+        ) else {
+            continue;
+        };
+
+        let raw = std::mem::take(&mut buffer);
+        let next_overlap = boundary_overlap_start(&raw, sample_rate)
+            .map(|start| raw[start..].to_vec())
+            .unwrap_or_default();
+        let next_overlap_samples = next_overlap.len();
+        let segment = DrainedSegment {
+            raw,
+            raw_rate: sample_rate,
+            observed_speech_ms,
+            reason,
+            overlap_samples,
+        };
+        buffer = next_overlap;
+        detector_pos = next_overlap_samples;
+        overlap_samples = next_overlap_samples;
+        observed_speech_ms = 0;
+        trailing_silence_ms = 0;
+        segments.push(TimedSegment {
+            segment,
+            boundary_sample: consumed,
+        });
+    }
+
+    segments.push(TimedSegment {
+        segment: DrainedSegment {
+            raw: buffer,
+            raw_rate: sample_rate,
+            observed_speech_ms,
+            reason: DrainReason::Release,
+            overlap_samples,
+        },
+        boundary_sample: samples.len(),
+    });
+    segments
 }
 
 /// §8b: prefer 16 kHz native capture; falls back to the device default if unsupported.
@@ -412,41 +621,46 @@ fn append_mono<T>(
     channels: usize,
     cap: usize,
     overrun: &AtomicBool,
+    visual_signal: &AtomicU32,
 ) where
     T: Sample,
     f32: FromSample<T>,
 {
     let mut b = lock_buf(buf);
     let denom = channels.max(1) as f32;
+    let mut squares = 0.0;
+    let mut count = 0usize;
     for frame in data.chunks(channels.max(1)) {
         if b.len() >= cap {
             overrun.store(true, Ordering::Relaxed);
         }
         let sum: f32 = frame.iter().map(|s| f32::from_sample(*s)).sum();
-        b.push(sum / denom);
+        let mono = sum / denom;
+        b.push(mono);
+        squares += mono * mono;
+        count += 1;
     }
+    let rms = (squares / count.max(1) as f32).sqrt();
+    let level = ((rms - 0.012) * 6.2).clamp(0.0, 1.0);
+    visual_signal.store(level.to_bits(), Ordering::Relaxed);
 }
 
-/// Full capture post-processing chain on 16 kHz mono samples:
-/// WebRTC APM (NS + AGC2) → peak normalize → silence trim. The single entry
-/// point for both live capture (`stop_with_raw`) and the `--wav` debug path,
-/// so offline runs exercise exactly what the mic path produces.
+/// Process one complete capture with a fresh APM instance.
+///
+/// Live segmented capture uses [`CaptureProcessor`] directly so APM state lasts
+/// for the full hold. One-shot callers keep isolated state between captures.
 pub fn process_capture(samples: &[f32], sample_rate: u32) -> Vec<f32> {
-    let mut processed = apply_audio_processing(samples, sample_rate);
-    normalize_peak(&mut processed);
-    trim_silence(&processed, sample_rate)
+    CaptureProcessor::new(sample_rate).process(samples)
 }
 
 /// Loudest sample lands here after normalization — leaves ~0.5 dB headroom so
 /// nothing clips on the 16-bit wav write / model input.
 const NORM_TARGET_PEAK: f32 = 0.95;
-/// Cap upward gain so a near-silent capture doesn't amplify the noise floor.
 const NORM_MAX_GAIN: f32 = 8.0;
 
-/// Peak-normalize in place: scale the whole buffer so its loudest sample sits at
-/// `NORM_TARGET_PEAK`. Pulls APM overshoot (>1.0) back under the clip ceiling and
-/// lifts quiet captures to a consistent level. Upward gain is capped.
-pub fn normalize_peak(samples: &mut [f32]) {
+/// Scale a capture toward the model's expected amplitude without amplifying a
+/// near-silent buffer beyond the measured noise-safe ceiling.
+fn normalize_peak(samples: &mut [f32]) {
     let peak = samples.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
     if peak <= 0.0 {
         return;
@@ -470,6 +684,15 @@ pub fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
             resample_linear(samples, from_rate, to_rate)
         }
     }
+}
+
+pub fn resampled_sample_count(sample_count: usize, from_rate: u32, to_rate: u32) -> usize {
+    if from_rate == 0 {
+        return 0;
+    }
+    (sample_count as u128 * to_rate as u128)
+        .div_ceil(from_rate as u128)
+        .min(usize::MAX as u128) as usize
 }
 
 fn resample_fft(samples: &[f32], from_rate: u32, to_rate: u32) -> Result<Vec<f32>> {
@@ -526,60 +749,106 @@ fn resample_linear(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     out
 }
 
-/// Run WebRTC audio processing (HPF + NS + AGC2) on mono PCM at `sample_rate`.
-///
-/// Processes in 10ms frames. Batch post-processing — no latency added during recording.
-/// Returns a new buffer of equal length; if the input isn't a multiple of the frame size
-/// the tail samples pass through unprocessed (they're silence from the trailing gap).
-pub fn apply_audio_processing(samples: &[f32], sample_rate: u32) -> Vec<f32> {
-    if samples.is_empty() {
-        return Vec::new();
-    }
+/// Stateful WebRTC processing for one key hold.
+#[derive(Debug)]
+pub struct CaptureProcessor {
+    apm: AudioProcessing,
+    frame_size: usize,
+    sample_rate: u32,
+}
 
-    let cfg = Config {
-        noise_suppression: Some(NoiseSuppression {
-            level: NoiseSuppressionLevel::Moderate,
-            ..Default::default()
-        }),
-        gain_controller2: Some(GainController2 {
-            adaptive_digital: Some(AdaptiveDigital {
-                headroom_db: 1.0,  // target -1 dBFS; normalize_peak is the real ceiling
-                max_gain_db: 12.0, // quiet mics need headroom; NS before AGC limits noise amp
+impl CaptureProcessor {
+    pub fn new(sample_rate: u32) -> Self {
+        let cfg = Config {
+            noise_suppression: Some(NoiseSuppression {
+                level: NoiseSuppressionLevel::Moderate,
+                ..Default::default()
+            }),
+            gain_controller2: Some(GainController2 {
+                adaptive_digital: Some(AdaptiveDigital {
+                    headroom_db: 1.0,
+                    max_gain_db: 12.0,
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
             ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let stream_cfg = StreamConfig::new(sample_rate, 1);
-    let frame_size = stream_cfg.num_frames(); // samples per 10ms
-    let mut apm = AudioProcessing::builder()
-        .config(cfg)
-        .capture_config(stream_cfg)
-        .render_config(StreamConfig::new(sample_rate, 1))
-        .build();
-    let mut out = Vec::with_capacity(samples.len());
+        };
+        let stream_cfg = StreamConfig::new(sample_rate, 1);
+        let frame_size = stream_cfg.num_frames();
+        let apm = AudioProcessing::builder()
+            .config(cfg)
+            .capture_config(stream_cfg)
+            .render_config(StreamConfig::new(sample_rate, 1))
+            .build();
 
-    for chunk in samples.chunks(frame_size) {
-        if chunk.len() < frame_size {
-            // Partial tail: pad to a full frame, process, then take only the real samples.
-            let mut padded = chunk.to_vec();
-            padded.resize(frame_size, 0.0);
-            let mut dest = vec![0.0f32; frame_size];
-            let _ = apm.process_capture_f32(&[&padded], &mut [&mut dest]);
-            out.extend_from_slice(&dest[..chunk.len()]);
-        } else {
-            let mut dest = vec![0.0f32; frame_size];
-            let _ = apm.process_capture_f32(&[chunk], &mut [&mut dest]);
-            out.extend_from_slice(&dest);
+        Self {
+            apm,
+            frame_size,
+            sample_rate,
         }
     }
 
-    out
+    /// Run APM, normalize peak level, then trim silence from this segment.
+    pub fn process(&mut self, samples: &[f32]) -> Vec<f32> {
+        let processed = self.apply_audio_processing(samples);
+        finalize_processed(processed, self.sample_rate)
+    }
+
+    /// Process repeated boundary context without replaying it through this
+    /// hold's persistent APM state.
+    pub fn process_with_overlap(&mut self, samples: &[f32], overlap_samples: usize) -> Vec<f32> {
+        let split = overlap_samples.min(samples.len());
+        if split == 0 {
+            return self.process(samples);
+        }
+
+        let mut processed =
+            CaptureProcessor::new(self.sample_rate).apply_audio_processing(&samples[..split]);
+        processed.extend(self.apply_audio_processing(&samples[split..]));
+        finalize_processed(processed, self.sample_rate)
+    }
+
+    /// Run WebRTC APM in 10 ms frames while retaining its adaptive state.
+    fn apply_audio_processing(&mut self, samples: &[f32]) -> Vec<f32> {
+        if samples.is_empty() {
+            return Vec::new();
+        }
+
+        let mut out = Vec::with_capacity(samples.len());
+
+        for chunk in samples.chunks(self.frame_size) {
+            if chunk.len() < self.frame_size {
+                // Partial tail: pad to a full frame, process, then take only the real samples.
+                let mut padded = chunk.to_vec();
+                padded.resize(self.frame_size, 0.0);
+                let mut dest = vec![0.0f32; self.frame_size];
+                let _ = self.apm.process_capture_f32(&[&padded], &mut [&mut dest]);
+                out.extend_from_slice(&dest[..chunk.len()]);
+            } else {
+                let mut dest = vec![0.0f32; self.frame_size];
+                let _ = self.apm.process_capture_f32(&[chunk], &mut [&mut dest]);
+                out.extend_from_slice(&dest);
+            }
+        }
+
+        out
+    }
+}
+
+fn finalize_processed(mut samples: Vec<f32>, sample_rate: u32) -> Vec<f32> {
+    normalize_peak(&mut samples);
+    trim_silence(&samples, sample_rate)
+}
+
+/// One-shot APM entry point for focused diagnostics and tests.
+#[cfg(test)]
+pub fn apply_audio_processing(samples: &[f32], sample_rate: u32) -> Vec<f32> {
+    CaptureProcessor::new(sample_rate).apply_audio_processing(samples)
 }
 
 /// §8d: trim leading/trailing silence using windowed RMS energy.
-/// After NS+AGC+normalize, the noise floor is well below SPEECH_RMS so speech
+/// After NS, AGC, and limiting, the noise floor is well below SPEECH_RMS so speech
 /// frames stand out clearly. Falls back to the full buffer if nothing crosses the
 /// threshold (all-silence recordings are handled by the min-speech gate downstream).
 fn trim_silence(samples: &[f32], sample_rate: u32) -> Vec<f32> {
@@ -746,13 +1015,17 @@ fn card_friendly_names() -> std::collections::HashMap<String, String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "debug-tools")]
+    use super::segment_samples;
     use super::{
-        adaptive_pause_ms, append_mono, apply_audio_processing, card_id, force_split_ms,
-        format_rank, high_level_label, lock_buf, resample, segment_drain_reason, DrainReason,
+        adaptive_pause_ms, append_mono, apply_audio_processing, boundary_overlap_start, card_id,
+        finalize_processed, force_split_ms, format_rank, high_level_label, lock_buf,
+        normalize_peak, resample, resampled_sample_count, segment_drain_reason, CaptureProcessor,
+        DrainReason,
     };
     use cpal::SampleFormat;
     use std::panic::{catch_unwind, AssertUnwindSafe};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
 
     /// Poison the buffer mutex (panic while holding it), then assert lock_buf still
@@ -780,7 +1053,14 @@ mod tests {
             panic!("poison the lock");
         }));
         assert!(buf.is_poisoned());
-        append_mono(&buf, &[0.5f32, 0.5], 1, 16, &AtomicBool::new(false));
+        append_mono(
+            &buf,
+            &[0.5f32, 0.5],
+            1,
+            16,
+            &AtomicBool::new(false),
+            &AtomicU32::new(0),
+        );
         assert_eq!(*lock_buf(&buf), vec![0.5, 0.5]);
     }
 
@@ -788,23 +1068,53 @@ mod tests {
     fn append_mono_flags_capacity_without_dropping_samples() {
         let buf = Arc::new(Mutex::new(Vec::<f32>::new()));
         let overrun = AtomicBool::new(false);
-        append_mono(&buf, &[0.1f32, 0.2, 0.3], 1, 2, &overrun);
+        append_mono(
+            &buf,
+            &[0.1f32, 0.2, 0.3],
+            1,
+            2,
+            &overrun,
+            &AtomicU32::new(0),
+        );
         assert_eq!(*lock_buf(&buf), vec![0.1, 0.2, 0.3]);
         assert!(overrun.load(Ordering::Relaxed));
     }
 
     #[test]
-    fn pause_requirement_shrinks_toward_soft_cap() {
-        assert_eq!(adaptive_pause_ms(300, 0, 30_000), 300);
-        assert_eq!(adaptive_pause_ms(300, 10_000, 30_000), 240);
-        assert_eq!(adaptive_pause_ms(300, 20_000, 30_000), 180);
-        assert_eq!(adaptive_pause_ms(300, 30_000, 30_000), 120);
-        assert_eq!(adaptive_pause_ms(300, 40_000, 30_000), 120);
+    fn append_publishes_visual_level_without_consuming_audio() {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let signal = AtomicU32::new(0);
+        append_mono(
+            &buf,
+            &[0.5f32, -0.5],
+            1,
+            16,
+            &AtomicBool::new(false),
+            &signal,
+        );
+        assert_eq!(lock_buf(&buf).as_slice(), &[0.5, -0.5]);
+        assert!(f32::from_bits(signal.load(Ordering::Relaxed)) > 0.9);
+    }
+
+    #[test]
+    fn pause_requirement_shrinks_toward_forced_split() {
+        assert_eq!(adaptive_pause_ms(300, 0, 30_000), 800);
+        assert_eq!(adaptive_pause_ms(300, 1_000, 30_000), 800);
+        assert_eq!(adaptive_pause_ms(300, 2_000, 30_000), 800);
+        assert_eq!(adaptive_pause_ms(300, 2_999, 30_000), 800);
+        assert_eq!(adaptive_pause_ms(300, 3_000, 30_000), 800);
+        assert_eq!(adaptive_pause_ms(300, 5_000, 30_000), 770);
+        assert_eq!(adaptive_pause_ms(300, 10_000, 30_000), 695);
+        assert_eq!(adaptive_pause_ms(300, 20_000, 30_000), 544);
+        assert_eq!(adaptive_pause_ms(300, 30_000, 30_000), 392);
+        assert_eq!(adaptive_pause_ms(300, 40_000, 30_000), 241);
+        assert_eq!(adaptive_pause_ms(300, 47_000, 30_000), 136);
+        assert_eq!(adaptive_pause_ms(300, 48_000, 30_000), 120);
     }
 
     #[test]
     fn pause_requirement_never_drops_below_detector_window_floor() {
-        assert_eq!(adaptive_pause_ms(50, 0, 30_000), 120);
+        assert_eq!(adaptive_pause_ms(50, 0, 30_000), 800);
         assert_eq!(adaptive_pause_ms(300, 1, 0), 120);
     }
 
@@ -816,19 +1126,19 @@ mod tests {
     #[test]
     fn segment_drain_tracks_the_shrinking_pause() {
         assert_eq!(
-            segment_drain_reason(1_000, 700, 293, 300, 30_000, false),
+            segment_drain_reason(1_200, 400, 799, 300, 30_000, false),
             None
         );
         assert_eq!(
-            segment_drain_reason(1_000, 700, 294, 300, 30_000, false),
+            segment_drain_reason(1_200, 400, 800, 300, 30_000, false),
             Some(DrainReason::Pause)
         );
         assert_eq!(
-            segment_drain_reason(20_000, 18_000, 180, 300, 30_000, false),
+            segment_drain_reason(20_000, 18_000, 544, 300, 30_000, false),
             Some(DrainReason::Pause)
         );
         assert_eq!(
-            segment_drain_reason(30_000, 28_000, 120, 300, 30_000, false),
+            segment_drain_reason(30_000, 28_000, 392, 300, 30_000, false),
             Some(DrainReason::MaxDuration)
         );
     }
@@ -843,6 +1153,59 @@ mod tests {
             segment_drain_reason(48_000, 0, 48_000, 300, 30_000, false),
             Some(DrainReason::MaxDuration)
         );
+    }
+
+    #[test]
+    fn overlap_starts_at_pause_before_final_word() {
+        let rate = 1_000;
+        let mut samples = vec![0.02; 100];
+        samples.extend(vec![0.0; 60]);
+        samples.extend(vec![0.02; 200]);
+        samples.extend(vec![0.0; 100]);
+
+        assert_eq!(boundary_overlap_start(&samples, rate), Some(100));
+    }
+
+    #[test]
+    fn continuous_speech_has_no_overlap_fallback() {
+        let samples = vec![0.02; 4_000];
+        assert_eq!(boundary_overlap_start(&samples, 1_000), None);
+    }
+
+    #[cfg(feature = "debug-tools")]
+    #[test]
+    fn wav_segmentation_polls_at_two_hundred_millisecond_boundaries() {
+        let mut samples = vec![0.02; 6_400];
+        samples.extend(vec![0.0; 16_000]);
+        samples.extend(vec![0.02; 3_200]);
+
+        let segments = segment_samples(&samples, 16_000, 300, 30_000);
+
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].boundary_sample, 19_200);
+        assert_eq!(segments[0].segment.reason, DrainReason::Pause);
+        assert_eq!(segments[1].boundary_sample, 25_600);
+        assert_eq!(segments[1].segment.reason, DrainReason::Release);
+    }
+
+    #[cfg(feature = "debug-tools")]
+    #[test]
+    fn wav_release_segment_includes_pause_selected_overlap() {
+        let mut samples = vec![0.02; 200];
+        samples.extend(vec![0.0; 60]);
+        samples.extend(vec![0.02; 200]);
+        samples.extend(vec![0.0; 1_000]);
+        samples.extend(vec![0.02; 200]);
+
+        let segments = segment_samples(&samples, 1_000, 300, 30_000);
+
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].boundary_sample, 1_400);
+        assert_eq!(segments[0].segment.overlap_samples, 0);
+        assert_eq!(segments[1].segment.reason, DrainReason::Release);
+        assert_eq!(segments[1].segment.overlap_samples, 1_200);
+        assert_eq!(&segments[1].segment.raw[..1_200], &samples[200..1_400]);
+        assert_eq!(&segments[1].segment.raw[1_200..], &samples[1_400..]);
     }
 
     #[test]
@@ -889,6 +1252,12 @@ mod tests {
     }
 
     #[test]
+    fn resampled_count_maps_overlap_prefix() {
+        assert_eq!(resampled_sample_count(960, 48_000, 16_000), 320);
+        assert_eq!(resampled_sample_count(961, 48_000, 16_000), 321);
+    }
+
+    #[test]
     fn apm_preserves_length() {
         let rate = 48_000u32;
         let samples: Vec<f32> = (0..rate as usize)
@@ -912,6 +1281,80 @@ mod tests {
             .collect();
         let out = apply_audio_processing(&samples, rate);
         assert!(out.iter().all(|v| v.abs() < 2.0));
+    }
+
+    #[test]
+    fn persistent_apm_matches_contiguous_frame_processing() {
+        let rate = 16_000u32;
+        let samples: Vec<f32> = (0..rate as usize * 2)
+            .map(|i| 0.2 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / rate as f32).sin())
+            .collect();
+
+        let contiguous = CaptureProcessor::new(rate).apply_audio_processing(&samples);
+        let mut segmented_processor = CaptureProcessor::new(rate);
+        let split = rate as usize;
+        let mut segmented = segmented_processor.apply_audio_processing(&samples[..split]);
+        segmented.extend(segmented_processor.apply_audio_processing(&samples[split..]));
+
+        assert_eq!(segmented, contiguous);
+    }
+
+    #[test]
+    fn overlap_does_not_advance_persistent_apm_twice() {
+        let rate = 16_000u32;
+        let samples: Vec<f32> = (0..rate as usize * 3)
+            .map(|i| 0.2 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / rate as f32).sin())
+            .collect();
+        let first = &samples[..rate as usize];
+        let novel = &samples[rate as usize..rate as usize * 2];
+        let next = &samples[rate as usize * 2..];
+        let overlap = &first[first.len() - 3_200..];
+        let mut repeated_segment = overlap.to_vec();
+        repeated_segment.extend_from_slice(novel);
+
+        let mut actual = CaptureProcessor::new(rate);
+        actual.process(first);
+        actual.process_with_overlap(&repeated_segment, overlap.len());
+
+        let mut expected = CaptureProcessor::new(rate);
+        expected.process(first);
+        expected.process(novel);
+
+        assert_eq!(actual.process(next), expected.process(next));
+    }
+
+    #[test]
+    fn overlap_segment_gets_one_combined_trim() {
+        let rate = 1_000;
+        let mut prefix = vec![0.1; 200];
+        prefix.extend(vec![0.0; 200]);
+        let mut novel = vec![0.0; 200];
+        novel.extend(vec![0.1; 200]);
+        let mut combined = prefix.clone();
+        combined.extend_from_slice(&novel);
+
+        let combined = finalize_processed(combined, rate);
+        let mut separately_processed = finalize_processed(prefix, rate);
+        separately_processed.extend(finalize_processed(novel, rate));
+
+        assert_eq!(combined.len(), 800);
+        assert_eq!(separately_processed.len(), 560);
+    }
+
+    #[test]
+    fn normalization_raises_quiet_audio_with_a_cap() {
+        let mut samples = vec![0.1, -0.2, 0.3];
+        normalize_peak(&mut samples);
+        let peak = samples.iter().fold(0.0f32, |a, value| a.max(value.abs()));
+        assert!((peak - 0.95).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn normalization_reduces_overshoot() {
+        let mut samples = vec![0.5, -2.0, 1.0];
+        normalize_peak(&mut samples);
+        let peak = samples.iter().fold(0.0f32, |a, value| a.max(value.abs()));
+        assert!((peak - 0.95).abs() < f32::EPSILON);
     }
 
     #[test]

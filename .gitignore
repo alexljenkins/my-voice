@@ -5,3 +5,5 @@ graphify-out
 # tools/fetch-librispeech-samples.sh — never committed. samples/expected.txt
 # (the labels/manifest) is the committed source of truth.
 *.wav
+samples/
+docs/

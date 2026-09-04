@@ -11,8 +11,6 @@
 //! modifiers in canonical order `Ctrl`, `Shift`, `Alt`, `Super`, joined by `+`,
 //! followed by exactly one non-modifier main key. Examples: `CapsLock`, `F12`,
 //! `Ctrl+Period`, `Ctrl+Shift+K`, `Alt+Slash`.
-#![cfg(target_os = "linux")]
-
 use std::num::NonZeroU32;
 use std::rc::Rc;
 

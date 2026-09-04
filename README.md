@@ -1,6 +1,6 @@
 # my-voice
 
-Local push-to-talk dictation for Linux and macOS.
+Local push-to-talk dictation for Linux.
 
 Hold **CapsLock** and talk. my-voice types each completed phrase into the app you are using. It keeps listening while it transcribes.
 
@@ -12,8 +12,6 @@ Hold **CapsLock** and talk. my-voice types each completed phrase into the app yo
 ## Get started
 
 You need a microphone and [Rust](https://rustup.rs).
-
-### Linux
 
 ```bash
 # Install the Linux build tools
@@ -29,7 +27,8 @@ my-voice --download
 my-voice
 ```
 
-A microphone icon appears in the system tray. The default model download is about 345 MB.
+A microphone icon appears in the system tray. The default model download is about 64 MB.
+While you hold the recording key, a small orb at the bottom of the display reacts to your voice.
 
 <details>
 <summary>Complete the one-time Linux keyboard setup</summary>
@@ -55,33 +54,7 @@ You can use clipboard mode from the tray if direct typing is unavailable.
 
 </details>
 
-### macOS
-
-```bash
-# Install Rust
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source "$HOME/.cargo/env"
-
-# Install and start my-voice
-cargo install --git https://github.com/alexljenkins/my-voice
-my-voice --download
-my-voice
-```
-
-macOS asks for Input Monitoring and Accessibility access. Enable both permissions for your terminal.
-
-<details>
-<summary>Find the macOS permissions</summary>
-
-1. Open **System Settings > Privacy & Security > Input Monitoring**.
-2. Enable access for your terminal.
-3. Open **System Settings > Privacy & Security > Accessibility**.
-4. Enable access for your terminal.
-5. Restart your terminal and run `my-voice` again.
-
-macOS does not have the tray menu yet. Use the configuration file for settings.
-
-</details>
+my-voice supports Linux only. macOS users can use [OpenSuperWhisper](https://github.com/Starmel/OpenSuperWhisper).
 
 ## Use it
 
@@ -95,7 +68,10 @@ Long dictation has no total duration limit. my-voice uses pauses to split speech
 
 ## Settings and help
 
-Linux users can change the microphone, model, typing mode, and startup behavior from the tray menu.
+You can change the microphone, model, listening orb, typing mode, and startup behavior from the tray menu.
+
+The listening orb uses X11. It also works through XWayland when `DISPLAY` is available.
+If the overlay cannot start, dictation and the tray continue to work.
 
 <details>
 <summary>Configuration file</summary>
@@ -103,7 +79,7 @@ Linux users can change the microphone, model, typing mode, and startup behavior 
 The default file is `~/.config/my-voice/config.toml`. You only need this file when the defaults do not fit.
 
 ```toml
-model = "moonshine-streaming-small"
+model = "moonshine-base"
 model_dir = "~/.local/share/my-voice/models"
 quantized = true
 threads = 0
@@ -114,11 +90,16 @@ grab = true
 audio_device = ""
 min_speech_ms = 300
 trailing_silence_ms = 300
-segment_pause_ms = 300
+segment_pause_ms = 800
 segment_max_ms = 30000
 injection = "auto"
+indicator_style = "neutral"
 corrections = []
 ```
+
+`indicator_style` accepts `calm`, `agreeable`, `thoughtful`, `neutral`, `cold`,
+`defensive`, `anxious`, `frustrated`, `angry`, or `random`. The `random` option
+chooses a new style for each recording.
 
 Run with another file when you want separate settings.
 
@@ -136,8 +117,7 @@ The default model is the best balance for most computers.
 | Model | Download | Use it when |
 |---|---:|---|
 | `moonshine-tiny` | 31 MB | The computer has little memory |
-| `moonshine-base` | 64 MB | You want a small download |
-| `moonshine-streaming-small` | 345 MB | You want the recommended model |
+| `moonshine-base` | 64 MB | You want the recommended model |
 | `moonshine-streaming-medium` | 566 MB | You want the best accuracy |
 
 All models run locally and support English only.

@@ -109,14 +109,15 @@ impl Moonshine {
         let session = build_session(&dec_path, threads)?;
         let (num_heads, head_dim) = detect_kv_dims(&session);
 
-        let collect = |sess: &Session, get: fn(&Session) -> Vec<String>, prefix: &str, side: &str| {
-            let mut v: Vec<String> = get(sess)
-                .into_iter()
-                .filter(|n| n.starts_with(prefix) && n.contains(side))
-                .collect();
-            v.sort();
-            v
-        };
+        let collect =
+            |sess: &Session, get: fn(&Session) -> Vec<String>, prefix: &str, side: &str| {
+                let mut v: Vec<String> = get(sess)
+                    .into_iter()
+                    .filter(|n| n.starts_with(prefix) && n.contains(side))
+                    .collect();
+                v.sort();
+                v
+            };
         let in_names = |s: &Session| s.inputs().iter().map(|i| i.name().to_string()).collect();
         let out_names = |s: &Session| s.outputs().iter().map(|o| o.name().to_string()).collect();
         info!("loading moonshine ({threads} threads)");

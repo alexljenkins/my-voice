@@ -22,6 +22,7 @@ editing. Each submenu marks the current choice with a green dot.
 | **Status line** (top, greyed) | — | Shows current state: `Ready` / `Listening…` / `Transcribing…` / `Downloading… N%` / `⚠ <error>` | live |
 | **Model** ▸ | Faster (tiny) · Balanced (base) · Accurate (small) · Most accurate (medium) | Pick the speech model. Undownloaded ones show "— not downloaded" and download on selection. | live (between utterances) |
 | **Microphone** ▸ | System default + every detected input device | Which mic to record from. | live |
+| **Listening orb** ▸ | 9 named styles + random | Changes the bottom-center voice-reactive indicator. Random chooses once per recording. | live |
 | **Hotkeys** ▸ → Recording key | *(display only)* | Shows the current trigger key. | — |
 | **Hotkeys** ▸ → Set keybind… | opens capture popup | Press a new key to rebind. | restart |
 | **Hotkeys** ▸ → Clipboard shortcut | on/off | Toggles whether **Shift+hotkey** copies to clipboard instead of typing. | live |
@@ -80,11 +81,11 @@ The app knows a lot about what's happening that never reaches a non-technical us
 or only appears in log files / debug builds. These are UX opportunities (feedback,
 trust, troubleshooting).
 
-### 3a. Recording & audio pipeline (almost entirely invisible)
+### 3a. Recording & audio pipeline
 Every capture runs through: native-rate capture → FFT resample to 16 kHz → WebRTC
 noise-suppression + auto-gain (APM) → peak-normalize → silence-trim. The user sees
 only "Listening…" then "Transcribing…". Not surfaced:
-- **No live level/volume meter** — user can't tell if the mic is actually hearing them.
+- The bottom-center listening orb reacts to the live microphone level while recording.
 - **Silence gate**: if the captured peak is below `0.01`, the utterance is dropped with *no feedback* — looks identical to a transcription failure.
 - **Too-short gate**: holds under `min_speech_ms` are dropped silently (see §2).
 - **Auto-gain / normalization** is applied (up to 8× gain on quiet input) but never indicated.
@@ -115,15 +116,15 @@ error but nothing persistent/reviewable.
 A rolling log is written to `~/.local/state/my-voice/my-voice.log`. No menu item
 points to it, opens it, or surfaces recent errors.
 
-### 3g. Platform gaps
-- **macOS has no tray UI at all** — *every* setting is config-file-only there. The graphical surface in §1a does not exist on Mac.
-- On Linux with no D-Bus / tray host, the daemon runs **headless** (no icon) and the user has no GUI either.
+### 3g. Headless sessions
+- On Linux with no D-Bus / tray host, the daemon runs without a tray icon.
+- The listening orb needs X11 or XWayland through `DISPLAY`. Its failure never stops dictation.
 
 ---
 
 ## 4. Quick gap summary for the redesign
 
-**Exposed & fine:** model choice, mic choice, hotkey rebind, clipboard shortcut,
+**Exposed & fine:** model choice, mic choice, listening orb, hotkey rebind, clipboard shortcut,
 grab toggle, paste mode, start-at-login, quit, download progress.
 
 **Exists, buried in config (should consider promoting):** custom-vocabulary
@@ -134,5 +135,4 @@ tuning, granular injection backend, custom model paths, threads, model storage d
 dropped (too quiet / too short / too long), download size before commit, model
 warm-up & eviction state, post-processing, a place to review past errors/logs.
 
-**Platform-conditional:** the entire GUI is Linux-only; macOS and headless Linux
-have *no* graphical settings surface at all.
+**Headless sessions:** Linux sessions without a tray host have no graphical settings surface.

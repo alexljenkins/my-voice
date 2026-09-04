@@ -250,6 +250,29 @@ impl ksni::Tray for MyVoiceTray {
             .into(),
         );
 
+        let indicator_style = self.menu.indicator_style;
+        let indicator_items = crate::indicator::IndicatorStyle::ALL
+            .iter()
+            .map(|&style| {
+                option_row(
+                    style.to_string(),
+                    style == indicator_style,
+                    true,
+                    move |this| {
+                        let _ = this.cmd_tx.send(UiCommand::SetIndicatorStyle(style));
+                    },
+                )
+            })
+            .collect();
+        items.push(
+            SubMenu {
+                label: "Listening orb".into(),
+                submenu: indicator_items,
+                ..Default::default()
+            }
+            .into(),
+        );
+
         // ── Hotkeys submenu ───────────────────────────────────────────────────
         let mut hk_items: Vec<Item> = Vec::new();
         hk_items.push(hint_line(&format!(

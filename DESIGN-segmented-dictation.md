@@ -36,12 +36,12 @@ One worker preserves segment order and keeps the mutable model serialized. The d
 Add:
 
 ```toml
-segment_pause_ms = 300
+segment_pause_ms = 800
 segment_max_ms = 30000
 ```
 
-- `segment_pause_ms`: independent from `trailing_silence_ms`. Start at 300ms.
-- `segment_max_ms`: 30s soft maximum. The required pause shrinks linearly from 300ms to 120ms as the segment grows. At 48s (`segment_max_ms + 18000ms`), split unconditionally.
+- `segment_pause_ms`: independent from `trailing_silence_ms`. Segments through 3s require at least 800ms of silence.
+- `segment_max_ms`: 30s soft maximum. From 3s to 48s, the required pause falls linearly from 800ms to 120ms. At 48s (`segment_max_ms + 18000ms`), split unconditionally.
 - Poll capture state every 200ms while recording (see the `recv_timeout` note under `src/main.rs` — no ticker thread).
 
 Both keys must also be added to `Config` + `Default` and to the `known` array in `warn_unknown_keys` (`src/config.rs:100`), or a config that sets them logs spurious unknown-key warnings, and to the config block in `README.md`. Neither belongs in `reload_actions`: they are read live at drain time, so a reload needs no rebuild.
@@ -76,8 +76,8 @@ The drain returns **raw samples only**. Resampling and `process_capture` happen 
 - Inspect only enough trailing raw audio to update windowed RMS/silence state; do not clone the growing buffer on every poll.
 - Maintain whether speech has actually been observed plus consecutive silent duration. Total buffer duration is not proof of speech.
 - Use a raw-input RMS threshold that is separately named, tested, and logged. If one fixed threshold is unreliable during microphone testing, replace this detector with an adaptive noise-floor/VAD implementation; do not borrow the post-processing threshold.
-- Before `segment_max_ms`, drain when speech was observed and trailing silence reaches the adaptive threshold. The threshold shrinks from `segment_pause_ms` to 120ms.
-- From `segment_max_ms` onward, drain on a 120ms voice gap. At `segment_max_ms + 18000ms`, drain unconditionally during uninterrupted speech.
+- Before 3s, drain when speech was observed and trailing silence reaches 800ms.
+- From 3s to `segment_max_ms + 18000ms`, lower the required pause linearly from 800ms to 120ms. At the endpoint, drain unconditionally during uninterrupted speech.
 - `mem::take` the buffer under its mutex, then release the lock immediately. No processing under the lock, and none on the daemon thread.
 - A `MaxDuration` drain with no speech observed (peak below the raw silence floor) is discarded in the drain and never enqueued — holding the key silently must not spend inference on pure noise.
 - Keep the cpal stream alive throughout.
@@ -162,7 +162,7 @@ Factor the current `handle_utterance` into transcription and injection stages. `
 
 Join non-empty segment text with one ASCII space. Do not add a leading space before the first non-empty result.
 
-- Change `Injector::inject` to return the effective `DeliveryMode::{Typed, Clipboard}`. This reports what actually happened on every platform, including Linux chain demotion and macOS CGEvent → pbcopy fallback.
+- Change `Injector::inject` to return the effective `DeliveryMode::{Typed, Clipboard}`. This reports Linux chain demotion.
 - **Typing mode:** inject only the newly joined chunk, prefixed with a space after the first successfully injected chunk.
 - **External typing speed:** use 2ms key hold and delay for `ydotool`. Keep 1ms spacing for `wtype` and `xdotool`. Zero-delay typing drops events in some target apps.
 - **Clipboard-only mode:** append to `accumulated_text`, then overwrite the clipboard with the complete accumulated hold after every result. On release, clipboard therefore contains the full dictation rather than only the last segment.

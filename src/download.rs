@@ -1,9 +1,8 @@
 //! HuggingFace model fetcher — used by `--download` and the first-run auto-download.
 //!
-//! Streams each file to `{name}.part`, then stages the whole model into a
-//! `{name}.partial` sibling dir that's renamed into place only once every file
-//! verifies — so a Ctrl-C or crash mid-download never leaves a truncated file
-//! or a half-populated model dir masquerading as complete.
+//! Streams each file to `{name}.part`, then stages the requested variant in a
+//! `{name}.partial` sibling directory. A new model uses one rename. A second
+//! precision keeps the installed files and adds its verified files.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -99,7 +98,7 @@ pub fn run(config: &Config) -> Result<()> {
 ///
 /// Fires [`DownloadEvent`]s through `on_event`. Callers should check
 /// `config.is_model_downloaded()` first; install is idempotent anyway
-/// (`install_atomic` returns early if the model dir exists), so duplicate
+/// (`install_atomic` returns early if the requested files exist), so duplicate
 /// calls are safe.
 pub fn start_background(config: Config, on_event: impl Fn(DownloadEvent) + Send + 'static) {
     std::thread::spawn(move || {
@@ -134,13 +133,9 @@ fn run_with_progress(config: &Config, on_progress: impl Fn(u8)) -> Result<()> {
     })
 }
 
-/// Install the configured model atomically: `download_into` fetches every file
-/// into a sibling `{model}.partial` staging dir, then a single `fs::rename`
-/// moves it into place only after they all succeed. Atomicity is per-MODEL, not
-/// per-file — the encoder (the sentinel) downloads first, so a crash mid-set
-/// would otherwise leave an encoder-present-but-decoder-missing dir that both
-/// download gates accept as complete (`is_model_downloaded` checks only the
-/// sentinel). After this the final dir only ever exists fully populated.
+/// Install the configured model variant after staging every requested file.
+/// A new model directory uses one atomic rename. An existing directory keeps
+/// the other variant and receives each missing file with an atomic rename.
 fn install_atomic(config: &Config, download_into: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
     let model_dir = config.resolved_model_dir();
     let final_dir = model_dir.join(&config.model);
@@ -148,16 +143,39 @@ fn install_atomic(config: &Config, download_into: impl FnOnce(&Path) -> Result<(
 
     // Sweep any stale partial from an earlier crash — there is no cross-run resume.
     fs::remove_dir_all(&staging).ok();
-    if final_dir.exists() {
-        return Ok(()); // already installed; the dir only ever exists complete
+    if config.is_model_downloaded() {
+        return Ok(());
     }
     fs::create_dir_all(&staging).with_context(|| format!("creating {}", staging.display()))?;
 
     download_into(&staging)?;
 
-    // Siblings under model_dir → same filesystem → the rename is atomic.
-    fs::rename(&staging, &final_dir)
-        .with_context(|| format!("installing model to {}", final_dir.display()))
+    if !final_dir.exists() {
+        // Siblings under model_dir → same filesystem → the rename is atomic.
+        return fs::rename(&staging, &final_dir)
+            .with_context(|| format!("installing model to {}", final_dir.display()));
+    }
+
+    // The directory can already hold int8 files while fp32 is being added, or
+    // vice versa. Keep shared and existing files, then move in only new files.
+    for entry in fs::read_dir(&staging)
+        .with_context(|| format!("reading staged model at {}", staging.display()))?
+    {
+        let source = entry?.path();
+        let target = final_dir.join(
+            source
+                .file_name()
+                .context("staged model entry has no file name")?,
+        );
+        if target.exists() {
+            fs::remove_file(&source)
+                .with_context(|| format!("removing duplicate {}", source.display()))?;
+        } else {
+            fs::rename(&source, &target)
+                .with_context(|| format!("installing model file to {}", target.display()))?;
+        }
+    }
+    fs::remove_dir(&staging).with_context(|| format!("removing {}", staging.display()))
 }
 
 fn files_for(spec: &ModelSpec, quantized: bool) -> &[crate::models::FileEntry] {
@@ -392,6 +410,91 @@ mod tests {
             !final_dir.exists(),
             "a half-downloaded model dir must not be installed"
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn install_atomic_adds_fp32_files_without_removing_int8() {
+        let root = std::env::temp_dir().join(format!(
+            "my-voice-test-coexisting-variants-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let config = Config {
+            model: "moonshine-base".into(),
+            model_dir: root.to_string_lossy().into_owned(),
+            quantized: false,
+            ..Default::default()
+        };
+        let final_dir = config.resolved_model_dir().join(&config.model);
+        fs::create_dir_all(&final_dir).unwrap();
+        fs::write(
+            final_dir.join("encoder_model_quantized.onnx"),
+            b"int8 encoder",
+        )
+        .unwrap();
+        fs::write(
+            final_dir.join("decoder_model_merged_quantized.onnx"),
+            b"int8 decoder",
+        )
+        .unwrap();
+        fs::write(final_dir.join("tokenizer.json"), b"tokenizer").unwrap();
+
+        install_atomic(&config, |staging| {
+            fs::write(staging.join("encoder_model.onnx"), b"fp32 encoder")?;
+            fs::write(staging.join("decoder_model_merged.onnx"), b"fp32 decoder")?;
+            fs::write(staging.join("tokenizer.json"), b"tokenizer")?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(config.is_model_downloaded());
+        assert_eq!(
+            fs::read(final_dir.join("encoder_model_quantized.onnx")).unwrap(),
+            b"int8 encoder"
+        );
+        assert_eq!(
+            fs::read(final_dir.join("decoder_model_merged_quantized.onnx")).unwrap(),
+            b"int8 decoder"
+        );
+        assert_eq!(
+            fs::read(final_dir.join("encoder_model.onnx")).unwrap(),
+            b"fp32 encoder"
+        );
+        assert_eq!(
+            fs::read(final_dir.join("decoder_model_merged.onnx")).unwrap(),
+            b"fp32 decoder"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn install_atomic_does_not_download_complete_variant() {
+        let root = std::env::temp_dir().join(format!(
+            "my-voice-test-complete-variant-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let config = Config {
+            model: "moonshine-base".into(),
+            model_dir: root.to_string_lossy().into_owned(),
+            quantized: false,
+            ..Default::default()
+        };
+        let final_dir = config.resolved_model_dir().join(&config.model);
+        fs::create_dir_all(&final_dir).unwrap();
+        for &(_, base) in models::find("moonshine-base").unwrap().files_full {
+            fs::write(final_dir.join(base), b"complete").unwrap();
+        }
+        let called = Cell::new(false);
+
+        install_atomic(&config, |_| {
+            called.set(true);
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(!called.get());
         let _ = fs::remove_dir_all(&root);
     }
 }

@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::indicator::IndicatorStyle;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -25,6 +27,7 @@ pub struct Config {
     pub segment_pause_ms: u64,
     pub segment_max_ms: u64,
     pub injection: String,
+    pub indicator_style: IndicatorStyle,
     /// Whole-word, case-insensitive find→replace pairs applied last in
     /// post-processing — fixes proper nouns/jargon the model never learns.
     pub corrections: Vec<(String, String)>,
@@ -33,7 +36,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            model: "moonshine-streaming-small".into(),
+            model: "moonshine-base".into(),
             model_dir: "~/.local/share/my-voice/models".into(),
             quantized: true,
             threads: 0,
@@ -44,9 +47,10 @@ impl Default for Config {
             audio_device: String::new(),
             min_speech_ms: 300,
             trailing_silence_ms: 300,
-            segment_pause_ms: 300,
+            segment_pause_ms: 800,
             segment_max_ms: 30_000,
             injection: "auto".into(),
+            indicator_style: IndicatorStyle::Neutral,
             corrections: Vec::new(),
         }
     }
@@ -119,6 +123,7 @@ impl Config {
             "segment_pause_ms",
             "segment_max_ms",
             "injection",
+            "indicator_style",
             "corrections",
         ];
         if let Ok(value) = toml::from_str::<toml::Table>(raw) {
@@ -164,8 +169,8 @@ impl Config {
         Ok(())
     }
 
-    /// True if the model files for the configured model are present on disk.
-    /// Uses the registry sentinel file; returns false for unknown/custom models.
+    /// True if every file for the configured model variant is present on disk.
+    /// Returns false for unknown/custom models.
     pub fn is_model_downloaded(&self) -> bool {
         let Some(spec) = crate::models::find(&self.model) else {
             return false;
@@ -174,12 +179,12 @@ impl Config {
         if !dir.is_dir() {
             return false;
         }
-        let sentinel = if self.quantized {
-            spec.sentinel_quantized
+        let files = if self.quantized {
+            spec.files_quantized
         } else {
-            spec.sentinel_full
+            spec.files_full
         };
-        dir.join(sentinel).exists()
+        files.iter().all(|&(_, base)| dir.join(base).is_file())
     }
 
     /// Map `model` → the Moonshine model directory. Does not check existence.
@@ -218,13 +223,21 @@ mod tests {
         let cfg = Config::default();
         let toml = toml::to_string(&cfg).unwrap();
         let back: Config = toml::from_str(&toml).unwrap();
-        assert_eq!(back.model, "moonshine-streaming-small");
+        assert_eq!(back.model, "moonshine-base");
         assert_eq!(back.load_timeout_secs, 1800);
         assert_eq!(back.min_speech_ms, 300);
         assert_eq!(back.trailing_silence_ms, 300);
-        assert_eq!(back.segment_pause_ms, 300);
+        assert_eq!(back.segment_pause_ms, 800);
         assert_eq!(back.segment_max_ms, 30_000);
         assert!(back.quantized);
+        assert_eq!(back.indicator_style, IndicatorStyle::Neutral);
+    }
+
+    #[test]
+    fn parses_indicator_style() {
+        let cfg: Config = toml::from_str("indicator_style = \"anxious\"").unwrap();
+        assert_eq!(cfg.indicator_style, IndicatorStyle::Anxious);
+        assert!(toml::from_str::<Config>("indicator_style = \"unknown\"").is_err());
     }
 
     #[test]
@@ -242,7 +255,7 @@ mod tests {
     fn partial_config_keeps_defaults() {
         let cfg: Config = toml::from_str("min_speech_ms = 500").unwrap();
         assert_eq!(cfg.min_speech_ms, 500);
-        assert_eq!(cfg.model, "moonshine-streaming-small"); // default preserved
+        assert_eq!(cfg.model, "moonshine-base"); // default preserved
     }
 
     #[test]
@@ -250,7 +263,7 @@ mod tests {
         // Wrong-type value on the DEFAULT path must not brick boot — use defaults.
         let cfg = Config::parse_or_default("min_speech_ms = \"loud\"", true).unwrap();
         assert_eq!(cfg.min_speech_ms, Config::default().min_speech_ms);
-        assert_eq!(cfg.model, "moonshine-streaming-small");
+        assert_eq!(cfg.model, "moonshine-base");
     }
 
     #[test]
@@ -262,7 +275,7 @@ mod tests {
     #[test]
     fn model_resolution_named() {
         let cfg = Config::default();
-        assert!(cfg.resolve_model().ends_with("moonshine-streaming-small"));
+        assert!(cfg.resolve_model().ends_with("moonshine-base"));
     }
 
     #[test]

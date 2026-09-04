@@ -6,6 +6,9 @@ description = "Hold-to-talk local voice typing. English. Fast. Lean."
 license = "MIT"
 repository = "https://github.com/alexljenkins/my-voice"
 
+[package.metadata]
+supported-platforms = ["linux"]
+
 [dependencies]
 # Audio
 cpal = "0.15"
@@ -41,8 +44,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 num_cpus = "1.16"
 sonora = "0.1.0"
-
-[target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.12"           # kernel-level hotkey + uinput passthrough
 libc = "0.2"
 arboard = "3"
@@ -51,7 +52,7 @@ zbus = "5"               # pure-Rust D-Bus (blocking API) for AT-SPI injection
 # matches zbus's default backend (no second runtime); blocking API for the sync daemon.
 ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
 # pure-Rust X11 protocol impl for XGrabKey hotkey backend (no C xcb/x11 libs).
-x11rb = { version = "0.13", default-features = false }
+x11rb = { version = "0.13", default-features = false, features = ["randr", "shape"] }
 # pure-Rust PNG encoder for per-menu-item icons (the green "selected" dot).
 png = "0.17"
 # pure-Rust D-Bus desktop notifications (z feature = zbus backend, no C libdbus).
@@ -62,11 +63,6 @@ winit = "0.30"
 softbuffer = "0.4"
 ab_glyph = "0.2"
 raw-window-handle = "0.6"
-
-[target.'cfg(target_os = "macos")'.dependencies]
-core-graphics = "0.24"
-core-foundation = "0.10"
-libc = "0.2"             # flock single-instance + signal handler
 
 [features]
 default = []

@@ -1,10 +1,13 @@
+#[cfg(not(target_os = "linux"))]
+compile_error!("my-voice supports Linux only");
+
 mod audio;
 mod autostart;
 mod config;
 mod download;
 mod hotkey;
+mod indicator;
 mod injector;
-#[cfg(target_os = "linux")]
 mod keybind_capture;
 mod model_cache;
 mod models;
@@ -13,11 +16,13 @@ mod text;
 mod transcriber;
 mod ui;
 
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use anyhow::Result;
@@ -30,7 +35,7 @@ use config::Config;
 use hotkey::{spawn_listener, HotkeyEvent};
 use injector::{DeliveryMode, Injector};
 use model_cache::ModelCache;
-use text::post_process;
+use text::{post_process, BoundaryTextJoiner};
 use ui::{ModelItem, TrayMenuState, TrayState, UiCommand, UiHandle};
 
 #[cfg(feature = "debug-tools")]
@@ -53,14 +58,19 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     wav: Option<PathBuf>,
 
+    /// With --wav: use the daemon's 200 ms segmentation cadence.
+    #[cfg(feature = "debug-tools")]
+    #[arg(long, requires = "wav")]
+    segmented: bool,
+
     /// With --wav: transcribe N times warm (model loaded+warmed once) and log
     /// per-iteration encode/decode + peak RSS. For the perf bench, not the gate.
     #[cfg(feature = "debug-tools")]
     #[arg(long, value_name = "N", default_value_t = 1)]
     bench_iters: usize,
 
-    /// Save each recording to <DIR>/<timestamp>.wav (and _raw.wav) while running
-    /// the normal hold-to-talk flow. Press Ctrl+C when done collecting samples.
+    /// Save one raw WAV per hold and append its transcript to <DIR>/expected.txt.
+    /// Press Ctrl+C when done collecting samples.
     #[arg(long, value_name = "DIR")]
     record: Option<PathBuf>,
 
@@ -82,7 +92,6 @@ struct Cli {
 
     /// Open the key-capture popup, write the chosen hotkey to config, exit.
     /// Spawned as a subprocess by the tray's "Set keybind…"; not for direct use.
-    #[cfg(target_os = "linux")]
     #[arg(long, hide = true)]
     set_hotkey: bool,
 
@@ -101,10 +110,7 @@ fn main() {
     let debug_invocation = cli.test || cli.wav.is_some();
     #[cfg(not(feature = "debug-tools"))]
     let debug_invocation = false;
-    #[cfg(target_os = "linux")]
     let set_hotkey = cli.set_hotkey;
-    #[cfg(not(target_os = "linux"))]
-    let set_hotkey = false;
     let is_daemon = !cli.download
         && !debug_invocation
         && !cli.list_devices
@@ -134,7 +140,6 @@ fn run(cli: Cli) -> Result<()> {
         return print_man();
     }
 
-    #[cfg(target_os = "linux")]
     if cli.set_hotkey {
         return run_set_hotkey(cli.config.as_deref());
     }
@@ -163,7 +168,7 @@ fn run(cli: Cli) -> Result<()> {
 
     #[cfg(feature = "debug-tools")]
     if let Some(path) = cli.wav.as_deref() {
-        return run_wav(&config, path, cli.bench_iters.max(1));
+        return run_wav(&config, path, cli.bench_iters.max(1), cli.segmented);
     }
 
     run_daemon(config, cli.config, cli.record)
@@ -204,7 +209,6 @@ fn status_line(pid: Option<i32>, model: &str) -> String {
 
 /// Signal-0 liveness probe: the process exists (or we lack permission to signal
 /// a process that does). ESRCH alone means dead.
-#[cfg(unix)]
 fn process_alive(pid: i32) -> bool {
     unsafe {
         libc::kill(pid, 0) == 0
@@ -216,7 +220,6 @@ fn process_alive(pid: i32) -> bool {
 /// if the user commits a key, persist it and exit 0; on cancel exit 10 so the
 /// parent daemon knows not to restart. Runs its own (winit) event loop, which is
 /// why it's a separate process rather than a thread inside the daemon.
-#[cfg(target_os = "linux")]
 fn run_set_hotkey(config_path: Option<&Path>) -> Result<()> {
     match keybind_capture::capture()? {
         Some(hotkey) => {
@@ -236,7 +239,7 @@ fn run_set_hotkey(config_path: Option<&Path>) -> Result<()> {
 /// Feed a wav file straight through the transcriber — isolates the inference
 /// path from the mic/capture path. Resamples to 16 kHz mono if needed.
 #[cfg(feature = "debug-tools")]
-fn run_wav(config: &Config, path: &std::path::Path, iters: usize) -> Result<()> {
+fn run_wav(config: &Config, path: &std::path::Path, iters: usize, segmented: bool) -> Result<()> {
     let mut reader = hound::WavReader::open(path).with_context(|| format!("opening {path:?}"))?;
     let spec = reader.spec();
     let ch = spec.channels.max(1) as usize;
@@ -257,20 +260,116 @@ fn run_wav(config: &Config, path: &std::path::Path, iters: usize) -> Result<()> 
         .collect();
     let resampled = audio::resample(&mono, spec.sample_rate, 16_000);
     let raw_peak = resampled.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
-    let samples = audio::process_capture(&resampled, 16_000);
+    let samples = (!segmented).then(|| audio::process_capture(&resampled, 16_000));
     info!(
         "wav: {:.2}s, {} Hz → 16 kHz, {ch} ch → mono, raw peak {raw_peak:.3}, processed {:.2}s",
         mono.len() as f32 / spec.sample_rate as f32,
         spec.sample_rate,
-        samples.len() as f32 / 16_000.0
+        samples.as_ref().map_or(resampled.len(), Vec::len) as f32 / 16_000.0
     );
     // create() loads + warms the model once, so every pass below is warm. The
     // first pass produces the text we print; extra passes (--bench-iters > 1)
     // only re-time the warm steady state, which is what a daemon user feels.
     let mut transcriber = transcriber::create(config)?;
     let mut text = String::new();
-    for _ in 0..iters {
-        text = post_process(&transcriber.transcribe(&samples)?, &config.corrections);
+    if segmented {
+        let mut marked_text = String::new();
+        let segments = audio::segment_samples(
+            &mono,
+            spec.sample_rate,
+            config.segment_pause_ms,
+            config.segment_max_ms,
+        );
+        for (index, timed) in segments.iter().enumerate() {
+            info!(
+                segment_index = index,
+                boundary_seconds = format_args!(
+                    "{:.3}",
+                    timed.boundary_sample as f64 / spec.sample_rate as f64
+                ),
+                reason = ?timed.segment.reason,
+                "segment boundary"
+            );
+        }
+        let observed_speech_ms = segments
+            .iter()
+            .map(|timed| timed.segment.observed_speech_ms)
+            .sum::<u64>();
+        for _ in 0..iters {
+            text.clear();
+            marked_text.clear();
+            let mut audio_processor = audio::CaptureProcessor::new(16_000);
+            let mut text_joiner = BoundaryTextJoiner::default();
+            let mut marked_text_joiner = BoundaryTextJoiner::with_overlap_markers();
+            for timed in &segments {
+                let resampled = audio::resample(&timed.segment.raw, timed.segment.raw_rate, 16_000);
+                let overlap_samples = audio::resampled_sample_count(
+                    timed.segment.overlap_samples,
+                    timed.segment.raw_rate,
+                    16_000,
+                );
+                let processed = audio_processor.process_with_overlap(&resampled, overlap_samples);
+                let peak = processed.iter().fold(0.0f32, |a, b| a.max(b.abs()));
+                if timed.segment.observed_speech_ms == 0 || peak < 0.01 {
+                    if let Some(chunk) = text_joiner.break_boundary() {
+                        append_joined(&mut text, &chunk);
+                    }
+                    if let Some(chunk) = marked_text_joiner.break_boundary() {
+                        append_joined(&mut marked_text, &chunk);
+                    }
+                    continue;
+                }
+                let raw_text = match transcriber.transcribe(&processed) {
+                    Ok(raw_text) => raw_text,
+                    Err(error) => {
+                        if let Some(chunk) = text_joiner.break_boundary() {
+                            append_joined(&mut text, &chunk);
+                        }
+                        if let Some(chunk) = marked_text_joiner.break_boundary() {
+                            append_joined(&mut marked_text, &chunk);
+                        }
+                        warn!("segment transcription failed: {error:#}");
+                        continue;
+                    }
+                };
+                let segment_text = post_process(&raw_text, &config.corrections);
+                if segment_text.is_empty() {
+                    if let Some(chunk) = text_joiner.break_boundary() {
+                        append_joined(&mut text, &chunk);
+                    }
+                    if let Some(chunk) = marked_text_joiner.break_boundary() {
+                        append_joined(&mut marked_text, &chunk);
+                    }
+                    continue;
+                }
+                if let Some(chunk) = text_joiner.push(
+                    &segment_text,
+                    timed.segment.reason == audio::DrainReason::Release,
+                    timed.segment.overlap_samples > 0,
+                ) {
+                    append_joined(&mut text, &chunk);
+                }
+                if let Some(chunk) = marked_text_joiner.push(
+                    &segment_text,
+                    timed.segment.reason == audio::DrainReason::Release,
+                    timed.segment.overlap_samples > 0,
+                ) {
+                    append_joined(&mut marked_text, &chunk);
+                }
+            }
+        }
+        if observed_speech_ms < config.min_speech_ms {
+            text.clear();
+            marked_text.clear();
+        }
+        info!(marked_transcript = %marked_text, "segmented transcript");
+    } else {
+        let samples = samples
+            .as_deref()
+            .expect("single-pass samples are processed");
+        for _ in 0..iters {
+            text = post_process(&transcriber.transcribe(samples)?, &config.corrections);
+        }
     }
     if let Some(kb) = peak_rss_kb() {
         info!("peak RSS {kb} kB");
@@ -284,20 +383,13 @@ fn run_wav(config: &Config, path: &std::path::Path, iters: usize) -> Result<()> 
 /// real memory footprint. Returns None where /proc isn't available.
 #[cfg(feature = "debug-tools")]
 fn peak_rss_kb() -> Option<u64> {
-    #[cfg(target_os = "linux")]
-    {
-        let status = std::fs::read_to_string("/proc/self/status").ok()?;
-        for line in status.lines() {
-            if let Some(rest) = line.strip_prefix("VmHWM:") {
-                return rest.split_whitespace().next()?.parse().ok();
-            }
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmHWM:") {
+            return rest.split_whitespace().next()?.parse().ok();
         }
-        None
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
-    }
+    None
 }
 
 /// Record a fixed 3s window, dump a debug wav, transcribe, and print — verifies
@@ -331,7 +423,6 @@ enum DaemonMsg {
     /// The cpal input stream died mid-capture (mic unplugged, server gone).
     AudioFailed(String),
     /// The keybind-capture subprocess committed a new hotkey to disk.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     HotkeyCaptured,
     SegmentComplete(SegmentResult),
 }
@@ -348,12 +439,45 @@ struct SegmentRequest {
 struct SegmentResult {
     hold_id: u64,
     segment_index: u32,
+    final_segment: bool,
+    has_audio_overlap: bool,
     text: Result<Option<String>, String>,
+}
+
+struct WorkerAudioState {
+    hold_id: Option<u64>,
+    processor: Option<audio::CaptureProcessor>,
+}
+
+impl WorkerAudioState {
+    fn new() -> Self {
+        Self {
+            hold_id: None,
+            processor: None,
+        }
+    }
+
+    fn begin_hold(&mut self, hold_id: u64) -> bool {
+        if self.hold_id == Some(hold_id) {
+            return false;
+        }
+        self.hold_id = Some(hold_id);
+        self.processor = Some(audio::CaptureProcessor::new(16_000));
+        true
+    }
+
+    fn process(&mut self, samples: &[f32], overlap_samples: usize) -> Vec<f32> {
+        self.processor
+            .as_mut()
+            .expect("begin_hold must run before audio processing")
+            .process_with_overlap(samples, overlap_samples)
+    }
 }
 
 fn spawn_transcription_worker(tx: mpsc::Sender<DaemonMsg>) -> SyncSender<SegmentRequest> {
     let (request_tx, request_rx) = mpsc::sync_channel::<SegmentRequest>(3);
     thread::spawn(move || {
+        let mut audio_state = WorkerAudioState::new();
         for request in request_rx {
             let SegmentRequest {
                 hold_id,
@@ -364,36 +488,49 @@ fn spawn_transcription_worker(tx: mpsc::Sender<DaemonMsg>) -> SyncSender<Segment
                 record_dir,
             } = request;
             debug!(?segment.reason, hold_id, segment_index, "processing audio segment");
-            let processed = audio::process_capture(
-                &audio::resample(&segment.raw, segment.raw_rate, 16_000),
-                16_000,
-            );
-            if let Some(dir) = record_dir {
-                let stem = format!("{hold_id}_{segment_index:04}");
-                let _ = write_wav(
-                    &segment.raw,
-                    segment.raw_rate,
-                    &dir.join(format!("{stem}_raw.wav")).to_string_lossy(),
-                );
-                let _ = write_wav(
-                    &processed,
-                    16_000,
-                    &dir.join(format!("{stem}.wav")).to_string_lossy(),
-                );
+            audio_state.begin_hold(hold_id);
+            let final_segment = segment.reason == audio::DrainReason::Release;
+            let has_audio_overlap = segment.overlap_samples > 0;
+            if segment.observed_speech_ms == 0 {
+                let _ = tx.send(DaemonMsg::SegmentComplete(SegmentResult {
+                    hold_id,
+                    segment_index,
+                    final_segment,
+                    has_audio_overlap,
+                    text: Ok(None),
+                }));
+                continue;
             }
+            let resampled = audio::resample(&segment.raw, segment.raw_rate, 16_000);
+            let overlap_samples =
+                audio::resampled_sample_count(segment.overlap_samples, segment.raw_rate, 16_000);
+            let processed = audio_state.process(&resampled, overlap_samples);
             let peak = processed.iter().fold(0.0f32, |a, b| a.max(b.abs()));
-            let text = if segment.observed_speech_ms == 0 || peak < 0.01 {
+            let text = if peak < 0.01 {
                 Ok(None)
             } else {
-                cache
-                    .transcribe_for_hold(&processed)
-                    .map(|raw| post_process(&raw, &corrections))
+                let recording = record_dir
+                    .as_deref()
+                    .map(|dir| save_raw_recording(dir, hold_id, &segment.raw, segment.raw_rate))
+                    .transpose();
+                recording
+                    .and_then(|filename| {
+                        let text = cache
+                            .transcribe_for_hold(&processed)
+                            .map(|raw| post_process(&raw, &corrections))?;
+                        if let (Some(dir), Some(filename)) = (record_dir.as_deref(), filename) {
+                            append_expected(dir, &filename, &text)?;
+                        }
+                        Ok(text)
+                    })
                     .map(|text| (!text.is_empty()).then_some(text))
                     .map_err(|e| format!("{e:#}"))
             };
             let _ = tx.send(DaemonMsg::SegmentComplete(SegmentResult {
                 hold_id,
                 segment_index,
+                final_segment,
+                has_audio_overlap,
                 text,
             }));
         }
@@ -443,7 +580,6 @@ fn run_daemon(
     // Enumerate input devices once at startup for the tray mic submenu.
     let audio_devices = audio::input_devices();
 
-    #[cfg(unix)]
     install_signal_handlers();
 
     // One channel, two producers. The hotkey listener and tray each get their
@@ -454,7 +590,6 @@ fn run_daemon(
 
     let (hk_tx, hk_rx) = mpsc::channel::<HotkeyEvent>();
     if let Err(e) = spawn_listener(&config, hk_tx) {
-        #[cfg(target_os = "linux")]
         notify::once(
             notify::ErrorKind::HotkeySetupNeeded,
             "Hotkey setup needed",
@@ -468,6 +603,7 @@ fn run_daemon(
     let (ui_tx, ui_rx) = mpsc::channel::<UiCommand>();
     let ui = ui::spawn(ui_tx);
     forward(ui_rx, daemon_tx.clone(), DaemonMsg::Ui);
+    let indicator = indicator::spawn(recorder.visual_signal());
 
     info!("ready — hold '{}' to record", config.hotkey);
     ui.set_state(TrayState::Ready);
@@ -544,6 +680,7 @@ fn run_daemon(
                                 } else {
                                     warn!("transcription queue remained full; stopping hold");
                                     recorder.cancel();
+                                    indicator.hide();
                                     hold.released = true;
                                     ui.set_state(TrayState::Error(
                                         "Transcription can't keep up".into(),
@@ -551,7 +688,7 @@ fn run_daemon(
                                 }
                             }
                         }
-                    } else if !hold.released {
+                    } else if !hold.released && record_dir.is_none() {
                         if let Some(segment) = recorder
                             .try_drain_segment(config.segment_pause_ms, config.segment_max_ms)
                         {
@@ -581,6 +718,10 @@ fn run_daemon(
                         ui.set_state(TrayState::Error("Couldn't start recording".into()));
                         continue;
                     }
+                    indicator.show(indicator::choose_style(
+                        config.indicator_style,
+                        next_hold_id,
+                    ));
                     // Kick the cold-start load now so it overlaps with speech;
                     // transcribe() later blocks on the same lock if it's not done.
                     let preload = Arc::clone(&cache);
@@ -605,10 +746,12 @@ fn run_daemon(
                         released: false,
                         audio_error: false,
                         pending_drain: None,
+                        text_joiner: BoundaryTextJoiner::default(),
                     });
                     next_hold_id += 1;
                 }
                 (State::Recording(_), HotkeyEvent::Release) => {
+                    indicator.hide();
                     // PTT trailing buffer: catch the tail of the last word.
                     thread::sleep(trailing);
                     ui.set_state(TrayState::Transcribing);
@@ -630,6 +773,7 @@ fn run_daemon(
                 _ => {}
             },
             DaemonMsg::AudioFailed(e) => {
+                indicator.hide();
                 warn!("audio stream failed: {e}");
                 if let State::Recording(hold) = &mut state {
                     recorder.cancel();
@@ -660,11 +804,36 @@ fn run_daemon(
                             for prior in deferred {
                                 deliver_text(hold, &prior, typer.as_mut(), clipper.as_mut());
                             }
-                            deliver_text(hold, &text, typer.as_mut(), clipper.as_mut());
+                            if let Some(chunk) = hold.text_joiner.push(
+                                &text,
+                                result.final_segment,
+                                result.has_audio_overlap,
+                            ) {
+                                deliver_text(hold, &chunk, typer.as_mut(), clipper.as_mut());
+                            }
                         }
-                        Ok(Some(text)) => hold.deferred_text.push(text),
-                        Ok(None) => {}
+                        Ok(Some(text)) => {
+                            if let Some(chunk) = hold.text_joiner.push(
+                                &text,
+                                result.final_segment,
+                                result.has_audio_overlap,
+                            ) {
+                                hold.deferred_text.push(chunk);
+                            }
+                        }
+                        Ok(None) => flush_pending_boundary(
+                            hold,
+                            config.min_speech_ms,
+                            typer.as_mut(),
+                            clipper.as_mut(),
+                        ),
                         Err(e) => {
+                            flush_pending_boundary(
+                                hold,
+                                config.min_speech_ms,
+                                typer.as_mut(),
+                                clipper.as_mut(),
+                            );
                             warn!("segment transcription failed: {e}");
                             hold.delivery_failed = true;
                         }
@@ -736,12 +905,10 @@ fn run_daemon(
             // "Set keybind…": launch the capture popup as a subprocess. It writes
             // the chosen hotkey to disk and exits; HotkeyCaptured then restarts us.
             DaemonMsg::Ui(UiCommand::CaptureHotkey) => {
-                #[cfg(target_os = "linux")]
                 spawn_keybind_capture(config_path.clone(), daemon_tx.clone());
             }
             DaemonMsg::HotkeyCaptured => {
                 info!("hotkey changed via popup — restarting to apply");
-                hotkey::restore_platform();
                 restart_self();
             }
 
@@ -779,7 +946,6 @@ fn run_daemon(
                 let mut updated = config.clone();
                 updated.grab = g;
                 save_config(&updated, config_path.as_deref());
-                hotkey::restore_platform();
                 restart_self();
             }
 
@@ -790,7 +956,8 @@ fn run_daemon(
                 cmd @ (UiCommand::SetModel(_)
                 | UiCommand::SetAudioDevice(_)
                 | UiCommand::SetInjection(_)
-                | UiCommand::SetClipboardHotkey(_)),
+                | UiCommand::SetClipboardHotkey(_)
+                | UiCommand::SetIndicatorStyle(_)),
             ) => {
                 let mut updated = config.clone();
                 match cmd {
@@ -798,6 +965,7 @@ fn run_daemon(
                     UiCommand::SetAudioDevice(d) => updated.audio_device = d,
                     UiCommand::SetInjection(inj) => updated.injection = inj,
                     UiCommand::SetClipboardHotkey(b) => updated.clipboard_hotkey = b,
+                    UiCommand::SetIndicatorStyle(style) => updated.indicator_style = style,
                     _ => unreachable!(),
                 }
                 save_config(&updated, config_path.as_deref());
@@ -819,7 +987,6 @@ fn run_daemon(
         }
     }
 
-    hotkey::restore_platform();
     Ok(())
 }
 
@@ -895,7 +1062,8 @@ fn apply_reload(
     }
     if actions.recorder {
         match AudioRecorder::new(&new.audio_device) {
-            Ok(r) => {
+            Ok(mut r) => {
+                r.use_visual_signal(recorder.visual_signal());
                 *recorder = r;
                 register_audio_error_cb(recorder, daemon_tx);
             }
@@ -913,9 +1081,6 @@ fn apply_reload(
         let label: &str = match new.model.as_str() {
             "moonshine-tiny" => "Switched to moonshine-tiny. Fastest, smallest download.",
             "moonshine-base" => "Switched to moonshine-base. Good balance of speed and accuracy.",
-            "moonshine-streaming-small" => {
-                "Switched to moonshine-streaming-small. Best accuracy for most use cases."
-            }
             "moonshine-streaming-medium" => {
                 "Switched to moonshine-streaming-medium. Highest accuracy."
             }
@@ -986,13 +1151,13 @@ fn build_tray_menu(config: &Config, audio_devices: &[audio::AudioDevice]) -> Tra
         inject_unlock_hint,
         grab: config.grab,
         clipboard_hotkey: config.clipboard_hotkey,
+        indicator_style: config.indicator_style,
         start_at_login: autostart::is_enabled(),
     }
 }
 
 /// Spawn the keybind-capture popup as a subprocess and, if it commits a new
 /// hotkey (exit 0), signal the daemon to restart so the new hotkey takes effect.
-#[cfg(target_os = "linux")]
 fn spawn_keybind_capture(config_path: Option<PathBuf>, tx: mpsc::Sender<DaemonMsg>) {
     thread::spawn(move || {
         let exe = match std::env::current_exe() {
@@ -1031,14 +1196,12 @@ fn spawn_keybind_capture(config_path: Option<PathBuf>, tx: mpsc::Sender<DaemonMs
 /// The child is launched with `MY_VOICE_RESTART=1` so its single-instance lock
 /// acquire retries briefly: parent and child overlap for the few ms until the
 /// parent exits and releases the flock.
-#[cfg(unix)]
 fn restart_self() -> ! {
     let exe = std::env::current_exe().unwrap_or_else(|e| {
         warn!("current_exe failed, cannot restart: {e}");
         std::process::exit(1);
     });
     let args: Vec<String> = std::env::args().skip(1).collect();
-    hotkey::restore_platform();
     match std::process::Command::new(exe)
         .args(args)
         .env("MY_VOICE_RESTART", "1")
@@ -1075,6 +1238,7 @@ struct HoldState {
     released: bool,
     audio_error: bool,
     pending_drain: Option<DrainedSegment>,
+    text_joiner: BoundaryTextJoiner,
 }
 
 fn append_joined(target: &mut String, text: &str) {
@@ -1084,11 +1248,33 @@ fn append_joined(target: &mut String, text: &str) {
     target.push_str(text);
 }
 
+fn flush_pending_boundary(
+    hold: &mut HoldState,
+    min_speech_ms: u64,
+    typer: &mut dyn Injector,
+    clipper: &mut dyn Injector,
+) {
+    let Some(chunk) = hold.text_joiner.break_boundary() else {
+        return;
+    };
+    if hold.observed_speech_ms < min_speech_ms {
+        hold.deferred_text.push(chunk);
+        return;
+    }
+    let deferred = std::mem::take(&mut hold.deferred_text);
+    for prior in deferred {
+        deliver_text(hold, &prior, typer, clipper);
+    }
+    deliver_text(hold, &chunk, typer, clipper);
+}
+
 /// Preserve the final live audio when a previously drained segment is waiting
 /// for queue space. Both buffers are contiguous samples from the same stream.
 fn merge_release_segment(mut pending: DrainedSegment, tail: DrainedSegment) -> DrainedSegment {
     debug_assert_eq!(pending.raw_rate, tail.raw_rate);
-    pending.raw.extend(tail.raw);
+    pending
+        .raw
+        .extend_from_slice(&tail.raw[tail.overlap_samples.min(tail.raw.len())..]);
     pending.observed_speech_ms = pending
         .observed_speech_ms
         .saturating_add(tail.observed_speech_ms);
@@ -1181,6 +1367,30 @@ fn write_wav(samples: &[f32], rate: u32, path: &str) -> Result<()> {
     Ok(())
 }
 
+fn save_raw_recording(dir: &Path, hold_id: u64, raw: &[f32], raw_rate: u32) -> Result<String> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before Unix epoch")?
+        .as_millis();
+    let filename = format!("{timestamp}_{hold_id}_raw.wav");
+    let path = dir.join(&filename);
+    write_wav(raw, raw_rate, &path.to_string_lossy())?;
+    Ok(filename)
+}
+
+fn append_expected(dir: &Path, filename: &str, transcript: &str) -> Result<()> {
+    let transcript = transcript.replace(['\t', '\r', '\n'], " ");
+    let expected_path = dir.join("expected.txt");
+    let mut expected = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&expected_path)
+        .with_context(|| format!("opening {}", expected_path.display()))?;
+    writeln!(expected, "{filename}\t{transcript}")
+        .with_context(|| format!("writing {}", expected_path.display()))?;
+    Ok(())
+}
+
 fn init_tracing(verbose: u8, daemon: bool) -> Option<tracing_appender::non_blocking::WorkerGuard> {
     let make_filter = || {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| {
@@ -1232,12 +1442,9 @@ fn init_tracing(verbose: u8, daemon: bool) -> Option<tracing_appender::non_block
     }
 }
 
-/// On any clean exit (SIGINT, SIGTERM) restore platform state and let the OS
-/// close file descriptors, which releases evdev grabs and the flock.
-#[cfg(unix)]
+/// On any clean exit, let the OS close file descriptors.
 fn install_signal_handlers() {
     extern "C" fn handler(_sig: libc::c_int) {
-        hotkey::restore_platform(); // restores hidutil on macOS; no-op on Linux
         std::process::exit(0);
     }
     unsafe {
@@ -1406,7 +1613,18 @@ mod tests {
             released: false,
             audio_error: false,
             pending_drain: None,
+            text_joiner: BoundaryTextJoiner::default(),
         }
+    }
+
+    #[test]
+    fn worker_audio_state_resets_only_between_holds() {
+        let mut state = WorkerAudioState::new();
+
+        assert!(state.begin_hold(1));
+        assert!(!state.begin_hold(1));
+        assert!(state.begin_hold(2));
+        assert_eq!(state.hold_id, Some(2));
     }
 
     fn cfg() -> Config {
@@ -1442,18 +1660,97 @@ mod tests {
     }
 
     #[test]
+    fn silent_release_segment_is_not_processed_or_saved() {
+        let dir =
+            std::env::temp_dir().join(format!("my-voice-silent-segment-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = Config::default();
+        let cache = ModelCache::new(&config);
+        let (daemon_tx, daemon_rx) = mpsc::channel();
+        let segment_tx = spawn_transcription_worker(daemon_tx);
+
+        segment_tx
+            .send(SegmentRequest {
+                hold_id: 7,
+                segment_index: 1,
+                segment: DrainedSegment {
+                    raw: vec![0.0; 3_200],
+                    raw_rate: 16_000,
+                    observed_speech_ms: 0,
+                    reason: audio::DrainReason::Release,
+                    overlap_samples: 0,
+                },
+                cache,
+                corrections: Vec::new(),
+                record_dir: Some(dir.clone()),
+            })
+            .unwrap();
+
+        let DaemonMsg::SegmentComplete(result) = daemon_rx.recv().unwrap() else {
+            panic!("expected segment completion");
+        };
+        assert_eq!(result.hold_id, 7);
+        assert_eq!(result.segment_index, 1);
+        assert!(matches!(result.text, Ok(None)));
+        assert!(!dir.join("7_0001_raw.wav").exists());
+        assert!(!dir.join("7_0001.wav").exists());
+
+        drop(segment_tx);
+        std::fs::remove_dir(&dir).unwrap();
+    }
+
+    #[test]
+    fn recording_writes_one_raw_wav_and_one_expected_line() {
+        let dir = std::env::temp_dir().join(format!("my-voice-recording-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let filename = save_raw_recording(&dir, 42, &[0.25, -0.25], 16_000).unwrap();
+        let wav = dir.join(&filename);
+        assert!(!dir.join("expected.txt").exists());
+        append_expected(&dir, &filename, "text with spaces").unwrap();
+
+        let wav_files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| {
+                let path = entry.unwrap().path();
+                (path.extension().and_then(|value| value.to_str()) == Some("wav")).then_some(path)
+            })
+            .collect();
+        assert_eq!(wav_files, std::slice::from_ref(&wav));
+        assert!(wav
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with("_42_raw.wav"));
+        let expected = std::fs::read_to_string(dir.join("expected.txt")).unwrap();
+        assert_eq!(
+            expected,
+            format!(
+                "{}\ttext with spaces\n",
+                wav.file_name().unwrap().to_string_lossy()
+            )
+        );
+
+        std::fs::remove_file(wav).unwrap();
+        std::fs::remove_file(dir.join("expected.txt")).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
     fn release_merge_keeps_all_captured_audio() {
         let pending = DrainedSegment {
             raw: vec![1.0, 2.0],
             raw_rate: 16_000,
             observed_speech_ms: 200,
             reason: audio::DrainReason::Pause,
+            overlap_samples: 0,
         };
         let tail = DrainedSegment {
-            raw: vec![3.0, 4.0],
+            raw: vec![2.0, 3.0, 4.0],
             raw_rate: 16_000,
             observed_speech_ms: 100,
             reason: audio::DrainReason::Release,
+            overlap_samples: 1,
         };
 
         let merged = merge_release_segment(pending, tail);
@@ -1489,7 +1786,7 @@ mod tests {
     fn model_fields_rebuild_cache() {
         for new in [
             Config {
-                model: "moonshine-base".into(),
+                model: "moonshine-streaming-medium".into(),
                 ..cfg()
             },
             Config {

@@ -1,0 +1,4 @@
+bench-wer  2026-09-03 12:32:55  iters=1  cores=1-6 (pinned)  gov=powersave
+
+── moonshine-base int8 ──
+  sample                   audio     enc     dec    RTF    RSS   CPU    WER strict  segWER segStrict

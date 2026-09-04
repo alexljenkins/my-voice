@@ -27,8 +27,9 @@ cargo build --release --features debug-tools
 
 ## 2. Record samples
 
-`--record <DIR>` runs the normal PTT daemon and saves every utterance to `<DIR>/<timestamp>.wav`
-(and `<timestamp>_raw.wav`). Hold CapsLock, speak, release — repeat as many times as you want.
+`--record <DIR>` runs the PTT daemon without pause segmentation. Hold CapsLock,
+speak, and release. Each completed hold saves one raw WAV and appends the model
+transcript to `<DIR>/expected.txt`. Correct that transcript before benchmarking.
 Press **Ctrl+C** when done.
 
 ```bash
@@ -37,8 +38,8 @@ mkdir -p samples
 ```
 
 Each completed hold-to-talk produces:
-- `<timestamp>.wav` — processed 16 kHz mono (what goes to the transcriber)
-- `<timestamp>_raw.wav` — raw native-rate mono (before the APM pipeline)
+- `<timestamp>_<hold>_raw.wav` — one native-rate stream for the full hold
+- one tab-separated line in `expected.txt` with the filename and transcript
 
 ## 3. Transcribe and compare
 
