@@ -759,16 +759,28 @@ fn run_daemon(
                     thread::sleep(trailing);
                     ui.set_state(TrayState::Transcribing);
                     let segment = recorder.stop_raw();
+                    let segments = if record_dir.is_none() {
+                        audio::split_release(segment)
+                    } else {
+                        vec![segment]
+                    };
                     if let State::Recording(hold) = &mut state {
                         hold.released = true;
-                        let segment = match hold.pending_drain.take() {
-                            Some(pending) => merge_release_segment(pending, segment),
-                            None => segment,
-                        };
-                        if let Err(segment) =
-                            queue_segment(&segment_tx, hold, segment, &cache, &config, &record_dir)
-                        {
-                            hold.pending_drain = Some(segment);
+                        for segment in segments {
+                            let segment = match hold.pending_drain.take() {
+                                Some(pending) => merge_release_segment(pending, segment),
+                                None => segment,
+                            };
+                            if let Err(segment) = queue_segment(
+                                &segment_tx,
+                                hold,
+                                segment,
+                                &cache,
+                                &config,
+                                &record_dir,
+                            ) {
+                                hold.pending_drain = Some(segment);
+                            }
                         }
                     }
                 }
@@ -1288,7 +1300,7 @@ fn merge_release_segment(mut pending: DrainedSegment, tail: DrainedSegment) -> D
     pending.observed_speech_ms = pending
         .observed_speech_ms
         .saturating_add(tail.observed_speech_ms);
-    pending.reason = audio::DrainReason::Release;
+    pending.reason = tail.reason;
     pending
 }
 
@@ -1776,11 +1788,22 @@ mod tests {
             overlap_samples: 1,
         };
 
+        let forced_tail = DrainedSegment {
+            raw: vec![5.0],
+            raw_rate: 16_000,
+            observed_speech_ms: 20,
+            reason: audio::DrainReason::MaxDuration,
+            overlap_samples: 0,
+        };
+
         let merged = merge_release_segment(pending, tail);
 
         assert_eq!(merged.raw, [1.0, 2.0, 3.0, 4.0]);
         assert_eq!(merged.observed_speech_ms, 300);
         assert_eq!(merged.reason, audio::DrainReason::Release);
+        let merged = merge_release_segment(merged, forced_tail);
+        assert_eq!(merged.raw, [1.0, 2.0, 3.0, 4.0, 5.0]);
+        assert_eq!(merged.reason, audio::DrainReason::MaxDuration);
     }
 
     #[test]
