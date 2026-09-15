@@ -25,7 +25,6 @@ pub struct Config {
     pub min_speech_ms: u64,
     pub trailing_silence_ms: u64,
     pub segment_pause_ms: u64,
-    pub segment_max_ms: u64,
     pub injection: String,
     pub indicator_style: IndicatorStyle,
     /// Whole-word, case-insensitive find→replace pairs applied last in
@@ -48,7 +47,6 @@ impl Default for Config {
             min_speech_ms: 300,
             trailing_silence_ms: 300,
             segment_pause_ms: 800,
-            segment_max_ms: 30_000,
             injection: "auto".into(),
             indicator_style: IndicatorStyle::Neutral,
             corrections: Vec::new(),
@@ -127,6 +125,11 @@ impl Config {
             "corrections",
         ];
         if let Ok(value) = toml::from_str::<toml::Table>(raw) {
+            if value.contains_key("segment_max_ms") {
+                tracing::warn!(
+                    "segment_max_ms is obsolete; splitting now starts at 50s and forces at 60s"
+                );
+            }
             for key in value.keys() {
                 if !known.contains(&key.as_str()) {
                     tracing::warn!("unknown config key ignored: {key}");
@@ -228,7 +231,6 @@ mod tests {
         assert_eq!(back.min_speech_ms, 300);
         assert_eq!(back.trailing_silence_ms, 300);
         assert_eq!(back.segment_pause_ms, 800);
-        assert_eq!(back.segment_max_ms, 30_000);
         assert!(back.quantized);
         assert_eq!(back.indicator_style, IndicatorStyle::Neutral);
     }

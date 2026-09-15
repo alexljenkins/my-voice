@@ -1,95 +1,50 @@
-# Audio Pre-Processing Evaluation Harness
+# Personal recording tests
 
-Dev tool for benchmarking capture quality. Requires the binary but no running daemon.
+Use Alex's recordings in `samples/my-samples/` for accuracy checks. Git tracks only `expected.txt`, the corrected transcripts. WAV files stay local.
 
-## Benchmark dataset (downloaded on demand)
+## Run the checks
 
-The WER benchmark audio (`samples/*.wav`) is **not committed** — only the labels
-`samples/expected.txt` are. Materialise the audio locally with:
-
-```bash
-./tools/fetch-librispeech-samples.sh   # ~330 MB tarball (cached), 100 clips
+```sh
+cargo test
+cargo test --features debug-tools
+cargo test --features debug-tools --test wer -- --ignored --nocapture
+cargo clippy -- -D warnings
 ```
 
-It pulls a deterministic 100-clip subset of LibriSpeech `test-other` (CC BY 4.0),
-converts each to 16 kHz mono WAV, and regenerates `samples/expected.txt`. The
-default `SEED`/counts select the same clips on any machine. Tune via env —
-`COUNT`, `LONG_COUNT`, `SHORT_MAX`, `LONG_MAX`, `SEED`, `SPLIT=test-clean`; see
-the script header. References are verbatim (ALL-CAPS, spelled-out numbers), so
-track the harness's normalized `WER` column, not `strict`. To record your own
-samples instead, use the `--record` flow below.
+The accuracy test compares both whole and segmented transcription against the same references. It fails above 2% word error rate. It requires the local WAV files and downloaded `moonshine-base` model. Missing files fail the check instead of reducing the dataset silently.
 
-## 1. Build release binary
+## Save a comparison report
 
-```bash
+```sh
 cargo build --release --features debug-tools
+RESULTS=docs/reviews/latest.txt SKIP_GOVERNOR=1 ./tools/bench-wer.sh
 ```
 
-## 2. Record samples
+The default model is `moonshine-base:int8`. Reports include each reference, whole transcript, boundary comparison, merged transcript, error counts, timings and peak memory. Reports stay local under the ignored `docs/` directory.
 
-`--record <DIR>` runs the PTT daemon without pause segmentation. Hold CapsLock,
-speak, and release. Each completed hold saves one raw WAV and appends the model
-transcript to `<DIR>/expected.txt`. Correct that transcript before benchmarking.
-Press **Ctrl+C** when done.
+Use separate paths when comparing versions. The script replaces its selected report file.
 
-```bash
-mkdir -p samples
-./target/release/my-voice --record samples/
+```sh
+RESULTS=docs/reviews/v1.txt SKIP_GOVERNOR=1 ./tools/bench-wer.sh
 ```
 
-Each completed hold-to-talk produces:
-- `<timestamp>_<hold>_raw.wav` — one native-rate stream for the full hold
-- one tab-separated line in `expected.txt` with the filename and transcript
+Options are `ITERS`, `CORES`, `MODEL`, `MODELS`, `SAMPLES`, `RESULTS`, and `SKIP_GOVERNOR`. The accuracy test accepts `MY_VOICE_WER_SAMPLES`, `MY_VOICE_WER_MODEL`, `MY_VOICE_WER_QUANTIZED`, and `MY_VOICE_WER_MAX`.
 
-## 3. Transcribe and compare
+## Add recordings
 
-Transcribe a single wav file directly (bypasses the mic, requires a downloaded model):
-
-```bash
-# build with debug-tools to get --wav
-./target/release/my-voice --wav samples/1234567890.wav
+```sh
+./target/release/my-voice --record samples/my-samples/
 ```
 
-## 4. Write a labels file
+Hold the push-to-talk key, speak, then release. Each hold saves one raw WAV and appends a model transcript to `expected.txt`. Listen to the recording and correct that transcript before using it as a reference. Stop the recorder with Ctrl+C.
 
-`labels.txt` — one line per file, tab-separated:
+Include recordings longer than 60 seconds to evaluate the 50–60 second split window. Existing short recordings check release behavior but cannot measure long boundary accuracy.
 
-```
-1234567890.wav	the quick brown fox jumps over the lazy dog
-1234567891.wav	hello world this is a test
-```
+## Inspect one recording
 
-No header line. Filenames are basenames only (no path). Lines without a tab are skipped.
-
-## 5. Run the evaluation
-
-```bash
-./tools/eval.sh samples/ labels.txt
+```sh
+./target/release/my-voice --wav samples/my-samples/1788393118159_1_raw.wav
+./target/release/my-voice --wav samples/my-samples/1788393118159_1_raw.wav --segmented
 ```
 
-Example output:
-
-```
-| File | Expected | Got | Match |
-|------|----------|-----|-------|
-| 1234567890.wav | the quick brown fox jumps over the lazy dog | the quick brown fox jumps over the lazy dog | ✓ |
-| 1234567891.wav | hello world this is a test | hello world this is a test | ✓ |
-
-## Summary
-
-Evaluated: 2 files
-Correct:   2
-Accuracy:  100%
-```
-
-Match comparison is case-insensitive and trims leading/trailing whitespace. Files with no
-entry in `labels.txt` are listed separately as unlabeled.
-
-## Using a specific audio device
-
-```bash
-./target/release/my-voice --list-devices
-./target/release/my-voice --record samples/ --config /path/to/config.toml
-```
-
-Or set `audio_device` in `~/.config/my-voice/config.toml` before recording.
+The segmented command uses the daemon's split policy. Its stderr includes boundary times and `| old || new |` comparisons. Those markers are diagnostic text, not the delivered transcript.

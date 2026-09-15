@@ -1,0 +1,16 @@
+1788393118159_1_raw.wav	I just wanted to record a few samples to make sure that audio is working correctly.
+1788393187800_2_raw.wav	I want to build out a new feature that takes in users' ideas and spits out a conference score on how to monetize it and make it go viral.
+1788393284670_3_raw.wav	Write a design doc on how to optimize this repo.
+1788393325918_4_raw.wav	What are your next suggestions for improvements that we could make?
+1788393384712_5_raw.wav	Now that we have segmented and raw audio files, do we need to change the pipeline to test these?
+1788393462054_6_raw.wav	What command do we run to test the new my samples files?
+1788397029129_7_raw.wav	Here we don't actually have to hide the percentages.
+1788398312789_9_raw.wav	I'm hesitant to add a five second minimum because if somebody speaks and then pauses, I want it to come out.
+1788398358424_10_raw.wav	But maybe when it's under three seconds, the pause or gap required is much higher than it currently is.
+1788492845171_1_raw.wav	Here I just wanted to check if I hold off a little bit and talk, if everything goes as planned. That way I can look at punctuation, spelling and overall accuracy when the model segments
+1788492941831_2_raw.wav	There are lots of variables to consider: PI rank, mission rank, operational priority, KTLO, features, dependencies and more.
+1788492990002_3_raw.wav	I wonder if there's a clear and simple answer to how I'm able to get so much value out of such a small model.
+1788493041835_4_raw.wav	Having it delay now so much and not just spitting out the answer. It's actually really good and makes transcription way, way better. Maybe I should have just removed this from the start instead of hoping for the best with segmentation and cutting up the text and audio randomly as I saw fit. Hopefully this is way better. But I wonder if it can transcribe all the way to the end.
+1788493297979_5_raw.wav	Actually, I think we need to edit the transcription again with one more caveat so that it's break context from the first audio file that we're saying is double up. Double line. Then the utterance from the second audio file that we're saying is the same as the first so that we can compare old new directly.
+1788493516191_6_raw.wav	That way I'll have a way to really break up the files based on how well the segmentation works.
+1788493634661_7_raw.wav	I think it will be good to have all of these samples so that you can optimize things and test different settings and pre-cleaning etc.

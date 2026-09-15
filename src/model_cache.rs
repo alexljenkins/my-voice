@@ -118,7 +118,7 @@ impl ModelCache {
     fn transcribe_inner(&self, audio: &[f32], keep_loaded: bool) -> Result<String> {
         let mut slot = self.lock_slot();
         load_locked(&mut slot, &self.factory)?;
-        let text = slot.as_mut().unwrap().transcribe(audio)?;
+        let text = slot.as_mut().unwrap().transcribe_bounded(audio)?;
         *self.lock_last_used() = Instant::now();
         if self.timeout_secs == 0 && !keep_loaded {
             *slot = None;

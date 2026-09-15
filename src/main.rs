@@ -35,6 +35,8 @@ use config::Config;
 use hotkey::{spawn_listener, HotkeyEvent};
 use injector::{DeliveryMode, Injector};
 use model_cache::ModelCache;
+#[cfg(feature = "debug-tools")]
+use text::BoundaryTextDiagnostic;
 use text::{post_process, BoundaryTextJoiner};
 use ui::{ModelItem, TrayMenuState, TrayState, UiCommand, UiHandle};
 
@@ -274,12 +276,7 @@ fn run_wav(config: &Config, path: &std::path::Path, iters: usize, segmented: boo
     let mut text = String::new();
     if segmented {
         let mut marked_text = String::new();
-        let segments = audio::segment_samples(
-            &mono,
-            spec.sample_rate,
-            config.segment_pause_ms,
-            config.segment_max_ms,
-        );
+        let segments = audio::segment_samples(&mono, spec.sample_rate, config.segment_pause_ms);
         for (index, timed) in segments.iter().enumerate() {
             info!(
                 segment_index = index,
@@ -300,7 +297,7 @@ fn run_wav(config: &Config, path: &std::path::Path, iters: usize, segmented: boo
             marked_text.clear();
             let mut audio_processor = audio::CaptureProcessor::new(16_000);
             let mut text_joiner = BoundaryTextJoiner::default();
-            let mut marked_text_joiner = BoundaryTextJoiner::with_overlap_markers();
+            let mut marked_text_joiner = BoundaryTextDiagnostic::default();
             for timed in &segments {
                 let resampled = audio::resample(&timed.segment.raw, timed.segment.raw_rate, 16_000);
                 let overlap_samples = audio::resampled_sample_count(
@@ -319,7 +316,7 @@ fn run_wav(config: &Config, path: &std::path::Path, iters: usize, segmented: boo
                     }
                     continue;
                 }
-                let raw_text = match transcriber.transcribe(&processed) {
+                let raw_text = match transcriber.transcribe_bounded(&processed) {
                     Ok(raw_text) => raw_text,
                     Err(error) => {
                         if let Some(chunk) = text_joiner.break_boundary() {
@@ -362,13 +359,18 @@ fn run_wav(config: &Config, path: &std::path::Path, iters: usize, segmented: boo
             text.clear();
             marked_text.clear();
         }
-        info!(marked_transcript = %marked_text, "segmented transcript");
+        // The benchmark parses this machine-readable line. Keep it independent
+        // from tracing's formatter and verbosity settings.
+        eprintln!("segmented transcript marked_transcript={marked_text}");
     } else {
         let samples = samples
             .as_deref()
             .expect("single-pass samples are processed");
         for _ in 0..iters {
-            text = post_process(&transcriber.transcribe(samples)?, &config.corrections);
+            text = post_process(
+                &transcriber.transcribe_bounded(samples)?,
+                &config.corrections,
+            );
         }
     }
     if let Some(kb) = peak_rss_kb() {
@@ -407,7 +409,10 @@ fn run_test(config: &Config) -> Result<()> {
     if let Err(e) = write_wav(&samples, rate, TEST_WAV) {
         warn!("failed to write {TEST_WAV}: {e}");
     }
-    let text = post_process(&transcriber.transcribe(&samples)?, &config.corrections);
+    let text = post_process(
+        &transcriber.transcribe_bounded(&samples)?,
+        &config.corrections,
+    );
     println!("{text}");
     Ok(())
 }
@@ -689,9 +694,7 @@ fn run_daemon(
                             }
                         }
                     } else if !hold.released && record_dir.is_none() {
-                        if let Some(segment) = recorder
-                            .try_drain_segment(config.segment_pause_ms, config.segment_max_ms)
-                        {
+                        if let Some(segment) = recorder.try_drain_segment(config.segment_pause_ms) {
                             if let Err(segment) = queue_segment(
                                 &segment_tx,
                                 hold,
@@ -1242,10 +1245,17 @@ struct HoldState {
 }
 
 fn append_joined(target: &mut String, text: &str) {
-    if !target.is_empty() {
+    if !target.is_empty() && !attaches_to_previous_word(text) {
         target.push(' ');
     }
     target.push_str(text);
+}
+
+fn attaches_to_previous_word(text: &str) -> bool {
+    matches!(
+        text.chars().next(),
+        Some('.' | ',' | '!' | '?' | ';' | ':' | ')' | ']' | '}' | '%' | '\'' | '"' | '…')
+    )
 }
 
 fn flush_pending_boundary(
@@ -1299,7 +1309,7 @@ fn deliver_text(
         }
         return;
     }
-    let chunk = if hold.delivered_any {
+    let chunk = if hold.delivered_any && !attaches_to_previous_word(text) {
         format!(" {text}")
     } else {
         text.to_string()
@@ -1657,6 +1667,19 @@ mod tests {
         assert_eq!(typer.injected, ["first phrase", " second phrase"]);
         assert!(clipper.injected.is_empty());
         assert_eq!(hold.accumulated_text, "first phrase second phrase");
+    }
+
+    #[test]
+    fn boundary_punctuation_attaches_to_the_previous_typed_word() {
+        let mut hold = hold_state();
+        let mut typer = RecordingInjector::typed();
+        let mut clipper = RecordingInjector::clipboard();
+
+        deliver_text(&mut hold, "first phrase", &mut typer, &mut clipper);
+        deliver_text(&mut hold, ", continued", &mut typer, &mut clipper);
+
+        assert_eq!(typer.injected, ["first phrase", ", continued"]);
+        assert_eq!(hold.accumulated_text, "first phrase, continued");
     }
 
     #[test]

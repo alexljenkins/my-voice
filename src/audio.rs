@@ -12,38 +12,24 @@ use sonora::{AudioProcessing, Config, StreamConfig};
 use tracing::{debug, error, info};
 
 const TARGET_RATE: u32 = 16_000;
-const CAPTURE_PREALLOC_SECONDS: usize = 60;
+const CAPTURE_PREALLOC_SECONDS: usize = crate::transcriber::MAX_AUDIO_SECONDS;
 const RAW_WINDOW_MS: u64 = 20;
 const RAW_SPEECH_RMS: f32 = 0.008;
-const FORCE_SPLIT_AFTER_SOFT_MS: u64 = 18_000;
 const MIN_SEGMENT_PAUSE_MS: u64 = 120;
-const EARLY_SEGMENT_MS: u64 = 3_000;
+const SEGMENT_START_MS: u64 = 50_000;
+const SEGMENT_LIMIT_MS: u64 = crate::transcriber::MAX_AUDIO_SECONDS as u64 * 1000;
 const EARLY_PAUSE_MS: u64 = 800;
 const OVERLAP_SEARCH_MS: u64 = 2_000;
 const OVERLAP_PAUSE_MS: u64 = 40;
 
-fn force_split_ms(soft_max_ms: u64) -> u64 {
-    soft_max_ms.saturating_add(FORCE_SPLIT_AFTER_SOFT_MS)
-}
-
-/// Keep the early pause threshold through the first 3 seconds, then reduce it
-/// linearly until the forced split. This avoids both tiny model inputs and a
-/// sudden threshold change at 3 seconds.
-fn adaptive_pause_ms(initial_pause_ms: u64, duration_ms: u64, soft_max_ms: u64) -> u64 {
-    if soft_max_ms == 0 {
-        return MIN_SEGMENT_PAUSE_MS;
-    }
+/// From 50 to 60 seconds, reduce the required pause linearly from 800 to 120 ms.
+fn adaptive_pause_ms(initial_pause_ms: u64, duration_ms: u64) -> u64 {
     let initial = initial_pause_ms.max(EARLY_PAUSE_MS);
-    if duration_ms <= EARLY_SEGMENT_MS {
-        return initial;
-    }
-    let forced_split_ms = force_split_ms(soft_max_ms);
-    if duration_ms >= forced_split_ms {
-        return MIN_SEGMENT_PAUSE_MS;
-    }
-    let ramp_ms = forced_split_ms - EARLY_SEGMENT_MS;
-    let elapsed_ms = duration_ms - EARLY_SEGMENT_MS;
-    let reduction = (initial - MIN_SEGMENT_PAUSE_MS) as u128 * elapsed_ms as u128 / ramp_ms as u128;
+    let elapsed_ms = duration_ms
+        .saturating_sub(SEGMENT_START_MS)
+        .min(SEGMENT_LIMIT_MS - SEGMENT_START_MS);
+    let reduction = (initial - MIN_SEGMENT_PAUSE_MS) as u128 * elapsed_ms as u128
+        / (SEGMENT_LIMIT_MS - SEGMENT_START_MS) as u128;
     initial - reduction as u64
 }
 
@@ -52,21 +38,18 @@ fn segment_drain_reason(
     observed_speech_ms: u64,
     trailing_silence_ms: u64,
     initial_pause_ms: u64,
-    soft_max_ms: u64,
     emergency: bool,
 ) -> Option<DrainReason> {
-    if emergency || duration_ms >= force_split_ms(soft_max_ms) {
+    if emergency || duration_ms >= SEGMENT_LIMIT_MS {
         return Some(DrainReason::MaxDuration);
     }
-    let required_pause_ms = adaptive_pause_ms(initial_pause_ms, duration_ms, soft_max_ms);
-    if observed_speech_ms == 0 || trailing_silence_ms < required_pause_ms {
+    if duration_ms < SEGMENT_START_MS
+        || observed_speech_ms == 0
+        || trailing_silence_ms < adaptive_pause_ms(initial_pause_ms, duration_ms)
+    {
         return None;
     }
-    Some(if duration_ms >= soft_max_ms {
-        DrainReason::MaxDuration
-    } else {
-        DrainReason::Pause
-    })
+    Some(DrainReason::Pause)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -315,18 +298,17 @@ impl AudioRecorder {
         segment
     }
 
-    pub fn try_drain_segment(&mut self, pause_ms: u64, max_ms: u64) -> Option<DrainedSegment> {
+    pub fn try_drain_segment(&mut self, pause_ms: u64) -> Option<DrainedSegment> {
         self.update_detector();
         let len = lock_buf(&self.buffer).len();
-        let new_samples = len.saturating_sub(self.overlap_samples);
-        let duration_ms = new_samples as u64 * 1000 / self.sample_rate as u64;
+        // Count overlap against the model input budget.
+        let duration_ms = len as u64 * 1000 / self.sample_rate as u64;
         let emergency = self.overrun.swap(false, Ordering::Relaxed);
         let reason = segment_drain_reason(
             duration_ms,
             self.observed_speech_ms,
             self.trailing_silence_ms,
             pause_ms,
-            max_ms,
             emergency,
         )?;
         if emergency {
@@ -462,12 +444,7 @@ fn update_segment_detector(
 /// Split fixed audio at the same 200 ms poll points as the daemon.
 /// The detector uses sample counts because a WAV file has no wall clock.
 #[cfg(feature = "debug-tools")]
-pub fn segment_samples(
-    samples: &[f32],
-    sample_rate: u32,
-    pause_ms: u64,
-    max_ms: u64,
-) -> Vec<TimedSegment> {
+pub fn segment_samples(samples: &[f32], sample_rate: u32, pause_ms: u64) -> Vec<TimedSegment> {
     const POLL_MS: usize = 200;
 
     let poll_samples = sample_rate as usize * POLL_MS / 1000;
@@ -489,14 +466,12 @@ pub fn segment_samples(
             &mut observed_speech_ms,
             &mut trailing_silence_ms,
         );
-        let new_samples = buffer.len().saturating_sub(overlap_samples);
-        let duration_ms = new_samples as u64 * 1000 / sample_rate as u64;
+        let duration_ms = buffer.len() as u64 * 1000 / sample_rate as u64;
         let Some(reason) = segment_drain_reason(
             duration_ms,
             observed_speech_ms,
             trailing_silence_ms,
             pause_ms,
-            max_ms,
             false,
         ) else {
             continue;
@@ -1019,9 +994,8 @@ mod tests {
     use super::segment_samples;
     use super::{
         adaptive_pause_ms, append_mono, apply_audio_processing, boundary_overlap_start, card_id,
-        finalize_processed, force_split_ms, format_rank, high_level_label, lock_buf,
-        normalize_peak, resample, resampled_sample_count, segment_drain_reason, CaptureProcessor,
-        DrainReason,
+        finalize_processed, format_rank, high_level_label, lock_buf, normalize_peak, resample,
+        resampled_sample_count, segment_drain_reason, CaptureProcessor, DrainReason,
     };
     use cpal::SampleFormat;
     use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -1097,60 +1071,52 @@ mod tests {
     }
 
     #[test]
-    fn pause_requirement_shrinks_toward_forced_split() {
-        assert_eq!(adaptive_pause_ms(300, 0, 30_000), 800);
-        assert_eq!(adaptive_pause_ms(300, 1_000, 30_000), 800);
-        assert_eq!(adaptive_pause_ms(300, 2_000, 30_000), 800);
-        assert_eq!(adaptive_pause_ms(300, 2_999, 30_000), 800);
-        assert_eq!(adaptive_pause_ms(300, 3_000, 30_000), 800);
-        assert_eq!(adaptive_pause_ms(300, 5_000, 30_000), 770);
-        assert_eq!(adaptive_pause_ms(300, 10_000, 30_000), 695);
-        assert_eq!(adaptive_pause_ms(300, 20_000, 30_000), 544);
-        assert_eq!(adaptive_pause_ms(300, 30_000, 30_000), 392);
-        assert_eq!(adaptive_pause_ms(300, 40_000, 30_000), 241);
-        assert_eq!(adaptive_pause_ms(300, 47_000, 30_000), 136);
-        assert_eq!(adaptive_pause_ms(300, 48_000, 30_000), 120);
+    fn pauses_cannot_split_before_fifty_seconds() {
+        for duration in [1_200, 3_000, 30_000, 49_999] {
+            assert_eq!(
+                segment_drain_reason(duration, 400, duration - 400, 800, false),
+                None
+            );
+        }
     }
 
     #[test]
-    fn pause_requirement_never_drops_below_detector_window_floor() {
-        assert_eq!(adaptive_pause_ms(50, 0, 30_000), 800);
-        assert_eq!(adaptive_pause_ms(300, 1, 0), 120);
+    fn pause_requirement_shrinks_linearly_from_fifty_to_sixty_seconds() {
+        for (duration, pause) in [
+            (50_000, 800),
+            (52_500, 630),
+            (55_000, 460),
+            (57_500, 290),
+            (59_000, 188),
+        ] {
+            assert_eq!(adaptive_pause_ms(800, duration), pause);
+            assert_eq!(
+                segment_drain_reason(duration, 400, pause - 1, 800, false),
+                None
+            );
+            assert_eq!(
+                segment_drain_reason(duration, 400, pause, 800, false),
+                Some(DrainReason::Pause)
+            );
+        }
+        assert_eq!(adaptive_pause_ms(800, 60_000), 120);
+        assert_eq!(adaptive_pause_ms(u64::MAX, u64::MAX), 120);
     }
 
     #[test]
-    fn thirty_second_soft_boundary_forces_at_forty_eight_seconds() {
-        assert_eq!(force_split_ms(30_000), 48_000);
-    }
-
-    #[test]
-    fn segment_drain_tracks_the_shrinking_pause() {
+    fn hard_limit_splits_continuous_speech_and_silence() {
+        assert_eq!(segment_drain_reason(59_999, 59_999, 0, 800, false), None);
         assert_eq!(
-            segment_drain_reason(1_200, 400, 799, 300, 30_000, false),
-            None
-        );
-        assert_eq!(
-            segment_drain_reason(1_200, 400, 800, 300, 30_000, false),
-            Some(DrainReason::Pause)
-        );
-        assert_eq!(
-            segment_drain_reason(20_000, 18_000, 544, 300, 30_000, false),
-            Some(DrainReason::Pause)
-        );
-        assert_eq!(
-            segment_drain_reason(30_000, 28_000, 392, 300, 30_000, false),
+            segment_drain_reason(60_000, 60_000, 0, 800, false),
             Some(DrainReason::MaxDuration)
         );
-    }
-
-    #[test]
-    fn segment_drain_requires_speech_until_the_hard_cap() {
+        assert_eq!(segment_drain_reason(59_999, 0, 59_999, 800, false), None);
         assert_eq!(
-            segment_drain_reason(30_000, 0, 30_000, 300, 30_000, false),
-            None
+            segment_drain_reason(60_000, 0, 60_000, 800, false),
+            Some(DrainReason::MaxDuration)
         );
         assert_eq!(
-            segment_drain_reason(48_000, 0, 48_000, 300, 30_000, false),
+            segment_drain_reason(61_000, 60_000, 0, 800, true),
             Some(DrainReason::MaxDuration)
         );
     }
@@ -1174,38 +1140,55 @@ mod tests {
 
     #[cfg(feature = "debug-tools")]
     #[test]
-    fn wav_segmentation_polls_at_two_hundred_millisecond_boundaries() {
-        let mut samples = vec![0.02; 6_400];
-        samples.extend(vec![0.0; 16_000]);
-        samples.extend(vec![0.02; 3_200]);
-
-        let segments = segment_samples(&samples, 16_000, 300, 30_000);
-
-        assert_eq!(segments.len(), 2);
-        assert_eq!(segments[0].boundary_sample, 19_200);
-        assert_eq!(segments[0].segment.reason, DrainReason::Pause);
-        assert_eq!(segments[1].boundary_sample, 25_600);
-        assert_eq!(segments[1].segment.reason, DrainReason::Release);
+    fn short_wav_waits_for_release_despite_long_pauses() {
+        let mut samples = vec![0.02; 400];
+        samples.extend(vec![0.0; 10_000]);
+        samples.extend(vec![0.02; 200]);
+        let segments = segment_samples(&samples, 1_000, 800);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].segment.reason, DrainReason::Release);
+        assert_eq!(segments[0].segment.raw, samples);
     }
 
     #[cfg(feature = "debug-tools")]
     #[test]
-    fn wav_release_segment_includes_pause_selected_overlap() {
-        let mut samples = vec![0.02; 200];
+    fn wav_split_preserves_overlap_and_every_new_sample() {
+        let mut samples = vec![0.02; 49_000];
         samples.extend(vec![0.0; 60]);
+        samples.extend(vec![0.02; 140]);
+        samples.extend(vec![0.0; 800]);
         samples.extend(vec![0.02; 200]);
-        samples.extend(vec![0.0; 1_000]);
-        samples.extend(vec![0.02; 200]);
-
-        let segments = segment_samples(&samples, 1_000, 300, 30_000);
-
+        let segments = segment_samples(&samples, 1_000, 800);
         assert_eq!(segments.len(), 2);
-        assert_eq!(segments[0].boundary_sample, 1_400);
-        assert_eq!(segments[0].segment.overlap_samples, 0);
+        assert_eq!(segments[0].boundary_sample, 50_000);
+        assert_eq!(segments[0].segment.reason, DrainReason::Pause);
+        assert_eq!(segments[1].segment.overlap_samples, 1_000);
         assert_eq!(segments[1].segment.reason, DrainReason::Release);
-        assert_eq!(segments[1].segment.overlap_samples, 1_200);
-        assert_eq!(&segments[1].segment.raw[..1_200], &samples[200..1_400]);
-        assert_eq!(&segments[1].segment.raw[1_200..], &samples[1_400..]);
+        let joined: Vec<_> = segments
+            .iter()
+            .flat_map(|s| s.segment.raw[s.segment.overlap_samples..].iter().copied())
+            .collect();
+        assert_eq!(joined, samples);
+    }
+
+    #[cfg(feature = "debug-tools")]
+    #[test]
+    fn long_wav_splits_at_sixty_seconds_without_losing_its_tail() {
+        let samples = vec![0.02; 120_200];
+        let segments = segment_samples(&samples, 1_000, 800);
+        assert_eq!(
+            segments
+                .iter()
+                .map(|s| s.boundary_sample)
+                .collect::<Vec<_>>(),
+            [60_000, 120_000, 120_200]
+        );
+        assert_eq!(segments[2].segment.reason, DrainReason::Release);
+        let joined: Vec<_> = segments
+            .iter()
+            .flat_map(|s| s.segment.raw.iter().copied())
+            .collect();
+        assert_eq!(joined, samples);
     }
 
     #[test]
