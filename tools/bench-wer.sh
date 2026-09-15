@@ -5,17 +5,17 @@
 #
 # The timed run transcribes each sample once (the model is loaded+warmed once,
 # then --bench-iters re-times the warm steady state). That run yields BOTH
-# the text — printed to stdout → WER vs samples/expected.txt — and the timings —
+# the text — printed to stdout → WER vs samples/my-samples/expected.txt — and the timings —
 # logged to stderr → enc/dec/RTF/RSS, plus whole-process CPU% from GNU time. No
 # Segmented accuracy runs separately because each CLI process owns one model.
 #
 # Output (terminal + $RESULTS): a per-model table (one row per sample, then an
 # AGGREGATE row) and a final cross-model SUMMARY table. $RESULTS also includes
-# the reference and both transcripts for each sample. Pipes mark repeated audio
-# in the segmented diagnostic transcript. $RESULTS is overwritten.
+# the reference, full pass, boundary comparison, and merged segment transcript.
+# `| old || new |` shows both transcriptions of repeated boundary audio.
 #
 # Usage:   ./tools/bench-wer.sh
-# Env:     ITERS=5  CORES=1-6  QUIET=0.5  QUIET_TIMEOUT=30  RESULTS=tools/zz_results.txt
+# Env:     ITERS=5  CORES=1-6  RESULTS=docs/reviews/latest.txt
 #          MODELS="m1 m2 ..."   MODEL=<one>   SAMPLES=<dir>   SKIP_GOVERNOR=1
 
 set -euo pipefail
@@ -23,14 +23,12 @@ cd "$(dirname "$0")/.."
 
 ITERS="${ITERS:-5}"
 CORES="${CORES:-1-6}"
-QUIET="${QUIET:-0.5}"                   # start only once 1-min loadavg is below this
-QUIET_TIMEOUT="${QUIET_TIMEOUT:-30}"    # ...or give up waiting after this many seconds
-RESULTS="${RESULTS:-tools/zz_results.txt}"
-MODELS="${MODELS:-moonshine-base:int8 moonshine-base:fp32 moonshine-streaming-medium:int8}"
+RESULTS="${RESULTS:-docs/reviews/latest.txt}"
+MODELS="${MODELS:-moonshine-base:int8}"
 [[ -n "${MODEL:-}" ]] && MODELS="$MODEL"   # MODEL=<one> overrides the whole list
 
 BIN=./target/release/my-voice
-SAMPLES="${SAMPLES:-samples}"
+SAMPLES="${SAMPLES:-samples/my-samples}"
 EXPECTED="$SAMPLES/expected.txt"
 
 [[ -x "$BIN" ]] || { echo "build first: cargo build --release --features debug-tools" >&2; exit 1; }
@@ -60,26 +58,6 @@ cleanup() {
 trap cleanup EXIT
 
 TIME=(); [[ -n "$GNUTIME" ]] && TIME=("$GNUTIME" -v -o "$tf")
-
-# Don't measure on a busy box: wait (quietly) up to $QUIET_TIMEOUT for the 1-min
-# loadavg to fall below $QUIET. Only the first and final states print (QUIET=0
-# skips). Bursty browser/editor load is the main jitter source.
-if awk "BEGIN{exit !($QUIET > 0)}"; then
-    load1="$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo 0)"
-    if awk "BEGIN{exit !($load1 > $QUIET)}"; then
-        echo "settling: loadavg $load1 > $QUIET — waiting up to ${QUIET_TIMEOUT}s..." >&2
-        waited=0
-        while awk "BEGIN{exit !($load1 > $QUIET)}" && (( waited < QUIET_TIMEOUT )); do
-            sleep 3; waited=$(( waited + 3 ))
-            load1="$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo 0)"
-        done
-        if awk "BEGIN{exit !($load1 > $QUIET)}"; then
-            echo "WARN: loadavg still $load1 (>$QUIET) after ${QUIET_TIMEOUT}s — measuring anyway, noisier." >&2
-        else
-            echo "settled: loadavg $load1 after ${waited}s" >&2
-        fi
-    fi
-fi
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 min() { printf '%s\n' "$@" | sort -n | head -1; }
@@ -129,6 +107,7 @@ ROW_H="  %-22s %7s %7s %7s %6s %6s %5s %6s %6s %7s %9s\n"
 ROW_F="  %-22s %6.1fs %5dms %5dms %6.3f %4dMB %4d%% %6.3f %6.3f %7.3f %9.3f\n"
 
 # ── run ──────────────────────────────────────────────────────────────────────
+mkdir -p "$(dirname "$RESULTS")"
 : > "$RESULTS"
 say "bench-wer  $(date '+%Y-%m-%d %H:%M:%S')  iters=$ITERS  cores=$CORES ${PIN:+(pinned)}  gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo ?)"
 
@@ -163,14 +142,14 @@ for variant in $MODELS; do
         file="${line%%[[:space:]]*}"                           # first token = filename
         ref="${line#"$file"}"; ref="${ref#"${ref%%[![:space:]]*}"}"   # rest = reference text
         wav="$SAMPLES/$file"
-        [[ -f "$wav" ]] || { echo "  skip missing $file" >&2; continue; }
+        [[ -f "$wav" ]] || { echo "missing personal sample $wav; see tools/README.md" >&2; exit 1; }
 
         # One run: stdout → hypothesis text; stderr → timings/RSS; $tf → CPU%.
         hyp="$("${TIME[@]}" "${PIN[@]}" "$BIN" -v --config "$cfg" --bench-iters "$ITERS" --wav "$wav" 2>"$errf")"
         seg_hyp="$("${PIN[@]}" "$BIN" -v --config "$cfg" --wav "$wav" --segmented 2>"$segerrf")"
         marked_line="$(grep -F 'segmented transcript marked_transcript=' "$segerrf" | tail -1 || true)"
         if [[ -z "$marked_line" ]]; then
-            echo "  $file: FAILED — no marked segmented transcript; rebuild with debug-tools" >&2
+            echo "  $file: FAILED — segmented run produced no marked transcript" >&2
             exit 1
         fi
         marked_seg_hyp="${marked_line#*segmented transcript marked_transcript=}"
@@ -198,9 +177,12 @@ for variant in $MODELS; do
         mb="$(awk "BEGIN{printf \"%.0f\", $rss/1024}")"
 
         sayf "$ROW_F" "$file" "$audio" "$me" "$md" "$rtf" "$mb" "${cpu:-0}" "$wer" "$strict" "$seg_wer" "$seg_strict"
-        printf '%s\n%s\n%s\n%s\n\n' "$file" "$ref" "$hyp" "$marked_seg_hyp" >> "$transcriptf"
+        printf '%s\n  reference: %s\n  full pass: %s\n  boundary:  %s\n  merged:    %s\n\n' \
+            "$file" "$ref" "$hyp" "$marked_seg_hyp" "$seg_hyp" >> "$transcriptf"
     done < "$EXPECTED"
 
+    (( trn > 0 )) || { echo "no reference words in $EXPECTED" >&2; exit 1; }
+    say "  Word errors: full=$tne/$trn segmented=$stne/$strn"
     agg_rtf="$(awk "BEGIN{printf \"%.3f\", ($sum_enc+$sum_dec)/1000/($total_audio>0?$total_audio:0.001)}")"
     agg_wer="$(awk "BEGIN{printf \"%.3f\", $tne/($trn>0?$trn:1)}")"
     agg_strict="$(awk "BEGIN{printf \"%.3f\", $tse/($trs>0?$trs:1)}")"

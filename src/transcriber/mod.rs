@@ -7,6 +7,8 @@ use ort::environment::GlobalThreadPoolOptions;
 
 use crate::config::Config;
 
+pub const MAX_AUDIO_SECONDS: usize = 60;
+
 /// Commit ONE global ORT intra-op thread pool before any `Session` is built, so
 /// the encoder + decoder graphs share it instead of each spinning up its own
 /// N-thread pool (sessions run strictly sequentially, so per-session pools are
@@ -37,6 +39,27 @@ pub trait Transcriber: Send {
     /// post-processes).
     fn transcribe(&mut self, audio: &[f32]) -> Result<String>;
 
+    /// Bound every inference call, including oversized release/record buffers.
+    /// Balance emergency chunks so a late poll cannot leave a tiny extra chunk.
+    fn transcribe_bounded(&mut self, audio: &[f32]) -> Result<String> {
+        let limit = MAX_AUDIO_SECONDS * 16_000;
+        if audio.len() <= limit {
+            return self.transcribe(audio);
+        }
+        tracing::warn!("audio exceeds 60s; splitting without dropping samples");
+        let chunk_size = audio.len().div_ceil(audio.len().div_ceil(limit));
+        let mut text = String::new();
+        for chunk in audio.chunks(chunk_size) {
+            let part = self.transcribe(chunk)?;
+            let part = part.trim();
+            if !text.is_empty() && !part.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(part);
+        }
+        Ok(text)
+    }
+
     /// Run one throwaway pass on a short silent buffer to pay ORT's first-call
     /// graph-init cost at load instead of on the user's first transcription.
     /// Default routes through `transcribe`, exercising the same encode+decode
@@ -61,6 +84,42 @@ pub fn create(config: &Config) -> Result<Box<dyn Transcriber>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oversized_audio_reaches_inference_in_order_without_loss() {
+        struct Recorder {
+            samples: Vec<f32>,
+            lengths: Vec<usize>,
+        }
+        impl Transcriber for Recorder {
+            fn transcribe(&mut self, audio: &[f32]) -> Result<String> {
+                self.samples.extend_from_slice(audio);
+                self.lengths.push(audio.len());
+                Ok(self.lengths.len().to_string())
+            }
+        }
+        let limit = MAX_AUDIO_SECONDS * 16_000;
+        for size in [0, 1, limit, limit + 1, limit * 2 + 3] {
+            let audio: Vec<f32> = (0..size).map(|i| (i % 97) as f32 / 97.0).collect();
+            let mut recorder = Recorder {
+                samples: Vec::new(),
+                lengths: Vec::new(),
+            };
+            let text = recorder.transcribe_bounded(&audio).unwrap();
+            assert_eq!(recorder.samples, audio);
+            assert!(recorder.lengths.iter().all(|&len| len <= limit));
+            assert_eq!(
+                text,
+                (1..=recorder.lengths.len())
+                    .map(|i| i.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            if size > limit {
+                assert!(recorder.lengths.iter().all(|&len| len >= limit / 2));
+            }
+        }
+    }
 
     /// The ort env is a process-global `OnceLock`: the first commit in this test
     /// binary must win (proving the global pool took effect), and a second must

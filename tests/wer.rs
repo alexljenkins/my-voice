@@ -1,4 +1,4 @@
-//! WER + latency regression harness over `samples/*.wav` + `samples/expected.txt`.
+//! WER + latency regression harness over `samples/my-samples/*.wav` + `samples/my-samples/expected.txt`.
 //!
 //! Reports three things per run: the gated normalized WER (lowercased,
 //! punctuation-stripped), a *strict* WER that preserves case + punctuation so
@@ -15,7 +15,8 @@
 //! Env knobs:
 //! * `MY_VOICE_WER_MODEL` — model name to test (default: moonshine-base)
 //! * `MY_VOICE_WER_QUANTIZED` — use the int8 model files (default: true)
-//! * `MY_VOICE_WER_MAX`   — max aggregate WER before failure (default: 0.25)
+//! * `MY_VOICE_WER_MAX` — max aggregate WER before failure (default: 0.02)
+//! * `MY_VOICE_WER_SAMPLES` — directory with WAVs and expected.txt (default: samples/my-samples)
 #![cfg(feature = "debug-tools")]
 
 use std::path::Path;
@@ -86,11 +87,17 @@ fn samples_wer() {
     let max_wer: f64 = std::env::var("MY_VOICE_WER_MAX")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(0.25);
+        .unwrap_or(0.02);
 
-    let samples_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples");
-    let expected = std::fs::read_to_string(samples_dir.join("expected.txt"))
-        .expect("samples/expected.txt missing");
+    let samples_dir = std::env::var_os("MY_VOICE_WER_SAMPLES")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/my-samples"));
+    let expected = std::fs::read_to_string(samples_dir.join("expected.txt")).unwrap_or_else(|e| {
+        panic!(
+            "{}: {e}; record personal samples with --record",
+            samples_dir.join("expected.txt").display()
+        )
+    });
 
     let config_path =
         std::env::temp_dir().join(format!("my-voice-wer-{}.toml", std::process::id()));
@@ -122,7 +129,11 @@ fn samples_wer() {
             .split_once(char::is_whitespace)
             .expect("bad expected.txt line");
         let wav = samples_dir.join(file);
-        assert!(wav.exists(), "missing sample {}", wav.display());
+        assert!(
+            wav.exists(),
+            "missing personal sample {}; WAV files stay local, see tools/README.md",
+            wav.display()
+        );
 
         let out = Command::new(env!("CARGO_BIN_EXE_my-voice"))
             .args(["-v", "--config"])

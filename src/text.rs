@@ -26,22 +26,15 @@ pub fn post_process(s: &str, corrections: &[(String, String)]) -> String {
     apply_corrections(out.trim(), corrections)
 }
 
-/// Joins independently transcribed segments without emitting an uncertain
-/// boundary word until the following segment can confirm the duplicate.
+/// Joins independently transcribed segments while keeping their shared audio
+/// from producing duplicate words at each boundary.
 #[derive(Debug, Default)]
 pub struct BoundaryTextJoiner {
-    pending_word: Option<String>,
-    mark_audio_overlaps: bool,
+    pending_punctuation: String,
+    trailing_words: Vec<String>,
 }
 
 impl BoundaryTextJoiner {
-    pub fn with_overlap_markers() -> Self {
-        Self {
-            pending_word: None,
-            mark_audio_overlaps: true,
-        }
-    }
-
     pub fn push(
         &mut self,
         text: &str,
@@ -49,112 +42,255 @@ impl BoundaryTextJoiner {
         has_audio_overlap: bool,
     ) -> Option<String> {
         let incoming = text.trim();
-        let resolved = match self.pending_word.take() {
-            Some(pending) if incoming.is_empty() => return Some(pending),
-            Some(pending) => resolve_boundary(
-                &pending,
-                incoming,
-                has_audio_overlap,
-                self.mark_audio_overlaps,
-            ),
-            None => incoming.to_string(),
+        if incoming.is_empty() {
+            return final_segment
+                .then(|| std::mem::take(&mut self.pending_punctuation))
+                .filter(|punctuation| !punctuation.is_empty());
+        }
+
+        let words = word_spans(incoming);
+        let dropped_words =
+            if has_audio_overlap && !self.trailing_words.is_empty() && !words.is_empty() {
+                aligned_prefix_len(&self.trailing_words, &words).max(1)
+            } else {
+                0
+            };
+
+        let mut resolved = if dropped_words == 0 {
+            join_boundary(&std::mem::take(&mut self.pending_punctuation), incoming)
+        } else {
+            self.pending_punctuation.clear();
+            let dropped = &words[dropped_words - 1];
+            incoming[dropped.core_end..].trim_start().to_string()
         };
+
+        remember_trailing_words(&mut self.trailing_words, &words[dropped_words..]);
 
         if final_segment {
             return (!resolved.is_empty()).then_some(resolved);
         }
 
-        match split_final_word(&resolved) {
-            Some((stable, pending)) => {
-                self.pending_word = Some(pending.to_string());
-                (!stable.is_empty()).then_some(stable.to_string())
-            }
-            None => (!resolved.is_empty()).then_some(resolved),
+        if dropped_words == words.len() && dropped_words > 0 {
+            self.pending_punctuation = resolved;
+            return None;
         }
+
+        let (body, punctuation) = strip_final_punctuation(&resolved);
+        resolved.truncate(body);
+        self.pending_punctuation = punctuation;
+        (!resolved.is_empty()).then_some(resolved)
     }
 
     pub fn break_boundary(&mut self) -> Option<String> {
-        self.pending_word
+        self.trailing_words.clear();
+        (!self.pending_punctuation.is_empty())
+            .then(|| std::mem::take(&mut self.pending_punctuation))
+    }
+}
+
+#[cfg(any(test, feature = "debug-tools"))]
+#[derive(Debug, Default)]
+pub struct BoundaryTextDiagnostic {
+    pending_segment: Option<String>,
+}
+
+#[cfg(any(test, feature = "debug-tools"))]
+impl BoundaryTextDiagnostic {
+    pub fn push(
+        &mut self,
+        text: &str,
+        final_segment: bool,
+        has_audio_overlap: bool,
+    ) -> Option<String> {
+        let incoming = text.trim();
+        if incoming.is_empty() {
+            return final_segment
+                .then(|| self.pending_segment.take())
+                .flatten()
+                .filter(|pending| !pending.is_empty());
+        }
+
+        let Some(previous) = self.pending_segment.take() else {
+            if final_segment {
+                return Some(incoming.to_string());
+            }
+            self.pending_segment = Some(incoming.to_string());
+            return None;
+        };
+
+        let previous_words = word_spans(&previous);
+        let incoming_words = word_spans(incoming);
+        if !has_audio_overlap || previous_words.is_empty() || incoming_words.is_empty() {
+            if final_segment {
+                return Some(join_with_space(&previous, incoming));
+            }
+            self.pending_segment = Some(incoming.to_string());
+            return Some(previous);
+        }
+
+        let trailing: Vec<String> = previous_words
+            .iter()
+            .map(|word| word.normalized.clone())
+            .collect();
+        let overlap_words = aligned_prefix_len(&trailing, &incoming_words).max(1);
+        let previous_overlap = &previous_words[previous_words.len() - overlap_words];
+        let incoming_overlap = &incoming_words[overlap_words - 1];
+        let before = previous[..previous_overlap.token_start].trim_end();
+        let old = previous[previous_overlap.token_start..].trim();
+        let new = incoming[..incoming_overlap.token_end].trim();
+        let novel = incoming[incoming_overlap.token_end..].trim_start();
+        let compared = format_diagnostic_boundary(before, old, new);
+
+        if final_segment {
+            return Some(join_with_space(&compared, novel));
+        }
+        self.pending_segment = Some(novel.to_string());
+        Some(compared)
+    }
+
+    pub fn break_boundary(&mut self) -> Option<String> {
+        self.pending_segment
             .take()
             .filter(|pending| !pending.is_empty())
     }
 }
 
-fn resolve_boundary(
-    left: &str,
-    right: &str,
-    has_audio_overlap: bool,
-    mark_audio_overlap: bool,
-) -> String {
-    let Some((right_word, right_core_end)) = first_word(right) else {
-        if has_audio_overlap && mark_audio_overlap {
-            return join_with_space(&format!("| {left} |"), right);
+#[derive(Debug)]
+struct WordSpan {
+    normalized: String,
+    #[cfg(any(test, feature = "debug-tools"))]
+    token_start: usize,
+    core_end: usize,
+    #[cfg(any(test, feature = "debug-tools"))]
+    token_end: usize,
+}
+
+fn word_spans(text: &str) -> Vec<WordSpan> {
+    let mut words = Vec::new();
+    let mut token_start = None;
+    for (index, character) in text
+        .char_indices()
+        .chain(std::iter::once((text.len(), ' ')))
+    {
+        if character.is_whitespace() {
+            if let Some(start) = token_start.take() {
+                let token = &text[start..index];
+                if let Some((core_end, normalized)) = normalized_token(token, start) {
+                    words.push(WordSpan {
+                        normalized,
+                        #[cfg(any(test, feature = "debug-tools"))]
+                        token_start: start,
+                        core_end,
+                        #[cfg(any(test, feature = "debug-tools"))]
+                        token_end: index,
+                    });
+                }
+            }
+        } else if token_start.is_none() {
+            token_start = Some(index);
         }
-        return join_with_space(left, right);
-    };
-    if !has_audio_overlap {
-        return join_with_space(left, right);
     }
-    if normalize_word(left) != normalize_word(right_word) {
-        return if mark_audio_overlap {
-            join_with_space(&format!("| {left} |"), right)
-        } else {
-            join_with_space(left, right)
-        };
-    }
-
-    let left_core_end = left
-        .char_indices()
-        .rfind(|(_, character)| character.is_alphanumeric())
-        .map(|(index, character)| index + character.len_utf8())
-        .unwrap_or(left.len());
-    if mark_audio_overlap {
-        return format!("| {} |{}", &left[..left_core_end], &right[right_core_end..]);
-    }
-    let mut joined = String::with_capacity(left_core_end + right.len() - right_core_end);
-    joined.push_str(&left[..left_core_end]);
-    joined.push_str(&right[right_core_end..]);
-    joined
+    words
 }
 
-fn first_word(text: &str) -> Option<(&str, usize)> {
-    let core_start = text
-        .char_indices()
-        .find(|(_, character)| character.is_alphanumeric())?
-        .0;
-    let token_end = text[core_start..]
-        .char_indices()
-        .find(|(_, character)| character.is_whitespace())
-        .map(|(index, _)| core_start + index)
-        .unwrap_or(text.len());
-    let core_end = text[core_start..token_end]
-        .char_indices()
-        .rfind(|(_, character)| character.is_alphanumeric())
-        .map(|(index, character)| core_start + index + character.len_utf8())?;
-    Some((&text[core_start..core_end], core_end))
+#[cfg(any(test, feature = "debug-tools"))]
+fn format_diagnostic_boundary(before: &str, old: &str, new: &str) -> String {
+    let mut output = String::new();
+    if !before.is_empty() {
+        output.push_str(before);
+        output.push(' ');
+    }
+    output.push_str("| ");
+    output.push_str(old);
+    output.push_str(" || ");
+    output.push_str(new);
+    output.push_str(" |");
+    output
 }
 
-fn normalize_word(word: &str) -> String {
-    word.chars()
+fn normalized_token(token: &str, offset: usize) -> Option<(usize, String)> {
+    let core_end = token
+        .char_indices()
+        .rfind(|(_, character)| character.is_alphanumeric())
+        .map(|(index, character)| offset + index + character.len_utf8())?;
+    let normalized = token
+        .chars()
         .filter(|character| character.is_alphanumeric())
         .flat_map(char::to_lowercase)
-        .collect()
+        .collect();
+    Some((core_end, normalized))
 }
 
-fn split_final_word(text: &str) -> Option<(&str, &str)> {
-    let trimmed = text.trim_end();
-    let final_word = trimmed
-        .char_indices()
-        .rfind(|(_, character)| character.is_alphanumeric())?
-        .0;
-    let token_start = trimmed[..final_word]
-        .char_indices()
-        .rfind(|(_, character)| character.is_whitespace())
-        .map(|(index, character)| index + character.len_utf8())
-        .unwrap_or(0);
-    Some((trimmed[..token_start].trim_end(), &trimmed[token_start..]))
+fn aligned_prefix_len(trailing: &[String], incoming: &[WordSpan]) -> usize {
+    let max_words = trailing.len().min(incoming.len()).min(2);
+    (1..=max_words)
+        .rev()
+        .find(|&count| {
+            let left = &trailing[trailing.len() - count..];
+            let right = &incoming[..count];
+            let distance = left
+                .iter()
+                .zip(right)
+                .map(|(left, right)| edit_distance(left, &right.normalized))
+                .sum::<usize>();
+            let length = left
+                .iter()
+                .zip(right)
+                .map(|(left, right)| left.chars().count().max(right.normalized.chars().count()))
+                .sum::<usize>();
+            distance == 0 || distance.saturating_mul(4) <= length
+        })
+        .unwrap_or(0)
 }
 
+fn edit_distance(left: &str, right: &str) -> usize {
+    let right: Vec<char> = right.chars().collect();
+    let mut row: Vec<usize> = (0..=right.len()).collect();
+    for (left_index, left_character) in left.chars().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = left_index + 1;
+        for (right_index, right_character) in right.iter().enumerate() {
+            let above = row[right_index + 1];
+            row[right_index + 1] = if left_character == *right_character {
+                diagonal
+            } else {
+                1 + diagonal.min(above).min(row[right_index])
+            };
+            diagonal = above;
+        }
+    }
+    row[right.len()]
+}
+
+fn remember_trailing_words(trailing: &mut Vec<String>, words: &[WordSpan]) {
+    trailing.extend(words.iter().map(|word| word.normalized.clone()));
+    if trailing.len() > 2 {
+        trailing.drain(..trailing.len() - 2);
+    }
+}
+
+fn strip_final_punctuation(text: &str) -> (usize, String) {
+    let Some((index, character)) = text
+        .char_indices()
+        .rfind(|(_, character)| character.is_alphanumeric())
+    else {
+        return (text.len(), String::new());
+    };
+    let core_end = index + character.len_utf8();
+    (core_end, text[core_end..].to_string())
+}
+
+fn join_boundary(punctuation: &str, text: &str) -> String {
+    if punctuation.is_empty() {
+        text.to_string()
+    } else if text.is_empty() {
+        punctuation.to_string()
+    } else {
+        format!("{punctuation} {text}")
+    }
+}
+
+#[cfg(any(test, feature = "debug-tools"))]
 fn join_with_space(left: &str, right: &str) -> String {
     match (left.is_empty(), right.is_empty()) {
         (true, _) => right.to_string(),
@@ -239,7 +375,7 @@ fn apply_corrections(s: &str, corrections: &[(String, String)]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{post_process, BoundaryTextJoiner};
+    use super::{post_process, BoundaryTextDiagnostic, BoundaryTextJoiner};
 
     fn pp(s: &str) -> String {
         post_process(s, &[])
@@ -336,15 +472,25 @@ mod tests {
     }
 
     #[test]
-    fn boundary_join_keeps_left_word_and_right_punctuation() {
+    fn nonfinal_segment_emits_its_last_word_without_punctuation() {
         let mut joiner = BoundaryTextJoiner::default();
         assert_eq!(
             joiner.push("Hello world.", false, false).as_deref(),
-            Some("Hello")
+            Some("Hello world")
+        );
+        assert_eq!(joiner.break_boundary().as_deref(), Some("."));
+    }
+
+    #[test]
+    fn boundary_join_keeps_left_word_and_new_punctuation() {
+        let mut joiner = BoundaryTextJoiner::default();
+        assert_eq!(
+            joiner.push("Hello world.", false, false).as_deref(),
+            Some("Hello world")
         );
         assert_eq!(
             joiner.push("World, this works.", true, true).as_deref(),
-            Some("world, this works.")
+            Some(", this works.")
         );
     }
 
@@ -353,17 +499,17 @@ mod tests {
         let mut joiner = BoundaryTextJoiner::default();
         assert_eq!(
             joiner.push("So happy. Someone...", false, false).as_deref(),
-            Some("So happy.")
+            Some("So happy. Someone")
         );
         assert_eq!(
             joiner.push("someone helped", true, true).as_deref(),
-            Some("Someone helped")
+            Some("helped")
         );
     }
 
     #[test]
     fn diagnostic_join_marks_each_confirmed_audio_overlap() {
-        let mut joiner = BoundaryTextJoiner::with_overlap_markers();
+        let mut joiner = BoundaryTextDiagnostic::default();
         let mut text = String::new();
         for chunk in [
             joiner.push("So happy. Someone...", false, false),
@@ -380,21 +526,37 @@ mod tests {
         }
         assert_eq!(
             text,
-            "So happy. | Someone | helped | another | person arrived."
+            "So happy. | Someone... || someone | helped | another || Another | person arrived."
         );
     }
 
     #[test]
     fn diagnostic_join_marks_an_overlap_mismatch_without_merging_it() {
-        let mut joiner = BoundaryTextJoiner::with_overlap_markers();
-        assert_eq!(
-            joiner.push("hello world.", false, false).as_deref(),
-            Some("hello")
-        );
+        let mut joiner = BoundaryTextDiagnostic::default();
+        assert_eq!(joiner.push("hello world.", false, false), None);
         assert_eq!(
             joiner.push("Different start.", true, true).as_deref(),
-            Some("| world. | Different start.")
+            Some("hello | world. || Different | start.")
         );
+    }
+
+    #[test]
+    fn diagnostic_join_marks_both_sides_of_a_two_word_alignment() {
+        let mut joiner = BoundaryTextDiagnostic::default();
+        assert_eq!(joiner.push("we can monetize it.", false, false), None);
+        assert_eq!(
+            joiner
+                .push("Monetise it, then grow.", true, true)
+                .as_deref(),
+            Some("we can | monetize it. || Monetise it, | then grow.")
+        );
+    }
+
+    #[test]
+    fn diagnostic_join_flushes_a_segment_when_the_boundary_breaks() {
+        let mut joiner = BoundaryTextDiagnostic::default();
+        assert_eq!(joiner.push("hello world.", false, false), None);
+        assert_eq!(joiner.break_boundary().as_deref(), Some("hello world."));
     }
 
     #[test]
@@ -402,45 +564,81 @@ mod tests {
         let mut joiner = BoundaryTextJoiner::default();
         assert_eq!(
             joiner.push("say hello!", false, false).as_deref(),
-            Some("say")
+            Some("say hello")
         );
         assert_eq!(
             joiner.push("... HELLO? Again", true, true).as_deref(),
-            Some("hello? Again")
+            Some("? Again")
         );
     }
 
     #[test]
-    fn boundary_join_preserves_both_words_on_mismatch() {
+    fn boundary_join_always_drops_the_first_overlap_word_on_mismatch() {
         let mut joiner = BoundaryTextJoiner::default();
         assert_eq!(
             joiner.push("hello world.", false, false).as_deref(),
-            Some("hello")
+            Some("hello world")
         );
         assert_eq!(
             joiner.push("Different start.", true, true).as_deref(),
-            Some("world. Different start.")
+            Some("start.")
         );
     }
 
     #[test]
-    fn release_flushes_an_unconfirmed_boundary_word() {
+    fn boundary_join_keeps_punctuation_after_a_mismatched_overlap_word() {
+        let mut joiner = BoundaryTextJoiner::default();
+        assert_eq!(
+            joiner.push("hello world.", false, false).as_deref(),
+            Some("hello world")
+        );
+        assert_eq!(
+            joiner.push("Different, start.", true, true).as_deref(),
+            Some(", start.")
+        );
+    }
+
+    #[test]
+    fn boundary_join_uses_a_two_word_alignment() {
+        let mut joiner = BoundaryTextJoiner::default();
+        assert_eq!(
+            joiner.push("we can monetize it.", false, false).as_deref(),
+            Some("we can monetize it")
+        );
+        assert_eq!(
+            joiner
+                .push("Monetise it, then grow.", true, true)
+                .as_deref(),
+            Some(", then grow.")
+        );
+    }
+
+    #[test]
+    fn release_flushes_the_held_punctuation() {
         let mut joiner = BoundaryTextJoiner::default();
         assert_eq!(
             joiner.push("only word.", false, false).as_deref(),
-            Some("only")
+            Some("only word")
         );
-        assert_eq!(joiner.push("", true, false).as_deref(), Some("word."));
+        assert_eq!(joiner.push("", true, false).as_deref(), Some("."));
         assert_eq!(joiner.break_boundary(), None);
     }
 
     #[test]
-    fn equal_words_without_audio_overlap_are_both_kept() {
+    fn overlap_only_segment_holds_its_punctuation() {
         let mut joiner = BoundaryTextJoiner::default();
-        assert_eq!(joiner.push("very", false, false), None);
+        assert_eq!(joiner.push("hello", false, false).as_deref(), Some("hello"));
+        assert_eq!(joiner.push("Hello.", false, true), None);
+        assert_eq!(joiner.push("Hello!", true, true).as_deref(), Some("!"));
+    }
+
+    #[test]
+    fn a_segment_without_audio_overlap_keeps_both_words() {
+        let mut joiner = BoundaryTextJoiner::default();
+        assert_eq!(joiner.push("very.", false, false).as_deref(), Some("very"));
         assert_eq!(
             joiner.push("Very good", true, false).as_deref(),
-            Some("very Very good")
+            Some(". Very good")
         );
     }
 
@@ -449,9 +647,9 @@ mod tests {
         let mut joiner = BoundaryTextJoiner::default();
         assert_eq!(
             joiner.push("first word", false, false).as_deref(),
-            Some("first")
+            Some("first word")
         );
-        assert_eq!(joiner.push("", false, true).as_deref(), Some("word"));
+        assert_eq!(joiner.break_boundary(), None);
         assert_eq!(
             joiner.push("Word again", true, true).as_deref(),
             Some("Word again")
@@ -463,9 +661,9 @@ mod tests {
         let mut joiner = BoundaryTextJoiner::default();
         assert_eq!(
             joiner.push("first word", false, false).as_deref(),
-            Some("first")
+            Some("first word")
         );
-        assert_eq!(joiner.break_boundary().as_deref(), Some("word"));
+        assert_eq!(joiner.break_boundary(), None);
         assert_eq!(
             joiner.push("Word again", true, true).as_deref(),
             Some("Word again")

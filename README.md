@@ -59,7 +59,9 @@ my-voice supports Linux only. macOS users can use [OpenSuperWhisper](https://git
 ## Use it
 
 1. Hold **CapsLock** and speak.
-2. Pause naturally. Each completed phrase appears while recording continues.
+2. Speak normally. Recordings under 50 seconds stay together until release.
+   After 50 seconds, a pause can deliver text while recording continues.
+   Continuous speech forces a split at 60 seconds.
 3. Release **CapsLock**. The final phrase appears and recording stops.
 
 Hold **Shift+CapsLock** to copy the full dictation to the clipboard instead.
@@ -91,7 +93,6 @@ audio_device = ""
 min_speech_ms = 300
 trailing_silence_ms = 300
 segment_pause_ms = 800
-segment_max_ms = 30000
 injection = "auto"
 indicator_style = "neutral"
 corrections = []
@@ -189,3 +190,16 @@ cargo build --features debug-tools
 The debug build adds `--test`, `--wav`, and `--record` diagnostics.
 
 </details>
+
+## Personal accuracy checks
+
+The main dataset is `samples/my-samples/`. Git tracks its corrected `expected.txt` references and excludes all WAV files.
+
+```sh
+cargo test
+cargo test --features debug-tools --test wer -- --ignored --nocapture
+cargo build --release --features debug-tools
+RESULTS=docs/reviews/latest.txt ./tools/bench-wer.sh
+```
+
+The accuracy check requires the local recordings and downloaded model. See [recording and testing](tools/README.md).
