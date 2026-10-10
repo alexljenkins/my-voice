@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use anyhow::Result;
@@ -659,14 +659,16 @@ fn run_daemon(
     let segment_tx = spawn_transcription_worker(daemon_tx.clone());
     let mut next_hold_id = 1u64;
 
+    let mut poll_deadline = Instant::now();
     loop {
         let received = match state {
             State::Idle => daemon_rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
-            State::Recording(_) => daemon_rx.recv_timeout(Duration::from_millis(200)),
+            State::Recording(_) => receive_recording_event(&daemon_rx, poll_deadline),
         };
         let msg = match received {
             Ok(msg) => msg,
             Err(RecvTimeoutError::Timeout) => {
+                poll_deadline = Instant::now() + Duration::from_millis(200);
                 if let State::Recording(hold) = &mut state {
                     if let Some(pending) = hold.pending_drain.take() {
                         match queue_segment(
@@ -679,17 +681,23 @@ fn run_daemon(
                         ) {
                             Ok(()) => {}
                             Err(pending) => {
-                                hold.pending_drain = Some(pending);
                                 if hold.released {
+                                    hold.pending_drain = Some(pending);
                                     debug!("waiting for transcription queue space");
                                 } else {
                                     warn!("transcription queue remained full; stopping hold");
-                                    recorder.cancel();
+                                    let tail = recorder.stop_raw();
+                                    hold.pending_drain = Some(merge_release_segment(pending, tail));
                                     indicator.hide();
                                     hold.released = true;
+                                    hold.audio_error = true;
                                     ui.set_state(TrayState::Error(
                                         "Transcription can't keep up".into(),
                                     ));
+                                    notify::send(
+                                        "Transcription can't keep up",
+                                        "Recording stopped. Captured speech is still being transcribed.",
+                                    );
                                 }
                             }
                         }
@@ -753,7 +761,7 @@ fn run_daemon(
                     });
                     next_hold_id += 1;
                 }
-                (State::Recording(_), HotkeyEvent::Release) => {
+                (State::Recording(hold), HotkeyEvent::Release) if !hold.released => {
                     indicator.hide();
                     // PTT trailing buffer: catch the tail of the last word.
                     thread::sleep(trailing);
@@ -813,45 +821,19 @@ fn run_daemon(
                     }
                     debug!(segment_index = result.segment_index, "segment complete");
                     hold.pending_segments = hold.pending_segments.saturating_sub(1);
-                    match result.text {
-                        Ok(Some(text)) if hold.observed_speech_ms >= config.min_speech_ms => {
-                            let deferred = std::mem::take(&mut hold.deferred_text);
-                            for prior in deferred {
-                                deliver_text(hold, &prior, typer.as_mut(), clipper.as_mut());
-                            }
-                            if let Some(chunk) = hold.text_joiner.push(
-                                &text,
-                                result.final_segment,
-                                result.has_audio_overlap,
-                            ) {
-                                deliver_text(hold, &chunk, typer.as_mut(), clipper.as_mut());
-                            }
-                        }
-                        Ok(Some(text)) => {
-                            if let Some(chunk) = hold.text_joiner.push(
-                                &text,
-                                result.final_segment,
-                                result.has_audio_overlap,
-                            ) {
-                                hold.deferred_text.push(chunk);
-                            }
-                        }
-                        Ok(None) => flush_pending_boundary(
-                            hold,
-                            config.min_speech_ms,
-                            typer.as_mut(),
-                            clipper.as_mut(),
-                        ),
-                        Err(e) => {
-                            flush_pending_boundary(
-                                hold,
-                                config.min_speech_ms,
-                                typer.as_mut(),
-                                clipper.as_mut(),
-                            );
-                            warn!("segment transcription failed: {e}");
-                            hold.delivery_failed = true;
-                        }
+                    deliver_segment(
+                        hold,
+                        &result,
+                        config.min_speech_ms,
+                        typer.as_mut(),
+                        clipper.as_mut(),
+                    );
+                    if result.text.is_err() {
+                        ui.set_state(TrayState::Error("A segment failed to transcribe".into()));
+                        notify::send(
+                            "A segment failed to transcribe",
+                            "Some speech is missing. Later segments can still be transcribed.",
+                        );
                     }
                     finished =
                         hold.released && hold.pending_segments == 0 && hold.pending_drain.is_none();
@@ -1003,6 +985,18 @@ fn run_daemon(
     }
 
     Ok(())
+}
+
+/// Receive daemon events until the next capture poll.
+fn receive_recording_event(
+    rx: &mpsc::Receiver<DaemonMsg>,
+    deadline: Instant,
+) -> std::result::Result<DaemonMsg, RecvTimeoutError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(RecvTimeoutError::Timeout);
+    }
+    rx.recv_timeout(remaining)
 }
 
 /// Pump one typed channel into the merged daemon channel under `wrap`. Stops
@@ -1254,6 +1248,43 @@ struct HoldState {
     audio_error: bool,
     pending_drain: Option<DrainedSegment>,
     text_joiner: BoundaryTextJoiner,
+}
+
+fn deliver_segment(
+    hold: &mut HoldState,
+    result: &SegmentResult,
+    min_speech_ms: u64,
+    typer: &mut dyn Injector,
+    clipper: &mut dyn Injector,
+) {
+    match &result.text {
+        Ok(Some(text)) if hold.observed_speech_ms >= min_speech_ms => {
+            let deferred = std::mem::take(&mut hold.deferred_text);
+            for prior in deferred {
+                deliver_text(hold, &prior, typer, clipper);
+            }
+            if let Some(chunk) =
+                hold.text_joiner
+                    .push(text, result.final_segment, result.has_audio_overlap)
+            {
+                deliver_text(hold, &chunk, typer, clipper);
+            }
+        }
+        Ok(Some(text)) => {
+            if let Some(chunk) =
+                hold.text_joiner
+                    .push(text, result.final_segment, result.has_audio_overlap)
+            {
+                hold.deferred_text.push(chunk);
+            }
+        }
+        Ok(None) => flush_pending_boundary(hold, min_speech_ms, typer, clipper),
+        Err(e) => {
+            flush_pending_boundary(hold, min_speech_ms, typer, clipper);
+            warn!("segment transcription failed: {e}");
+            hold.audio_error = true;
+        }
+    }
 }
 
 fn append_joined(target: &mut String, text: &str) {
@@ -1640,6 +1671,22 @@ mod tests {
     }
 
     #[test]
+    fn busy_event_queue_cannot_postpone_capture_poll() {
+        let (tx, rx) = mpsc::channel();
+        for _ in 0..100 {
+            tx.send(DaemonMsg::Hotkey(HotkeyEvent::Press {
+                clipboard_only: false,
+            }))
+            .unwrap();
+        }
+        assert!(matches!(
+            receive_recording_event(&rx, Instant::now()),
+            Err(RecvTimeoutError::Timeout)
+        ));
+        assert!(rx.try_recv().is_ok(), "poll must retain queued events");
+    }
+
+    #[test]
     fn worker_audio_state_resets_only_between_holds() {
         let mut state = WorkerAudioState::new();
 
@@ -1665,6 +1712,40 @@ mod tests {
                 restart: false,
             }
         );
+    }
+
+    #[test]
+    fn failed_segment_does_not_suppress_later_transcripts() {
+        let mut hold = hold_state();
+        hold.observed_speech_ms = 1_000;
+        let mut typer = RecordingInjector::typed();
+        let mut clipper = RecordingInjector::clipboard();
+        for (index, text) in [
+            Ok(Some("First phrase.".to_string())),
+            Err("model failed".to_string()),
+            Ok(Some("Last phrase.".to_string())),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            deliver_segment(
+                &mut hold,
+                &SegmentResult {
+                    hold_id: 1,
+                    segment_index: index as u32,
+                    final_segment: index == 2,
+                    has_audio_overlap: false,
+                    text,
+                },
+                300,
+                &mut typer,
+                &mut clipper,
+            );
+        }
+        assert_eq!(typer.injected.concat(), "First phrase. Last phrase.");
+        assert_eq!(hold.accumulated_text, "First phrase. Last phrase.");
+        assert!(hold.audio_error);
+        assert!(!hold.delivery_failed);
     }
 
     #[test]

@@ -1336,6 +1336,27 @@ mod tests {
         assert_eq!(joined, samples);
     }
 
+    #[cfg(feature = "debug-tools")]
+    #[test]
+    fn ten_minute_dictation_keeps_every_sample_and_the_release_tail() {
+        let samples: Vec<f32> = (0..600_200)
+            .map(|i| 0.02 + (i % 97) as f32 * 1e-4)
+            .collect();
+        let segments = segment_samples(&samples, 1_000, 800);
+        assert_eq!(segments.len(), 11);
+        for (index, timed) in segments[..10].iter().enumerate() {
+            assert_eq!(timed.boundary_sample, (index + 1) * 60_000);
+            assert_eq!(timed.segment.reason, DrainReason::MaxDuration);
+        }
+        assert_eq!(segments[10].segment.reason, DrainReason::Release);
+        assert_eq!(segments[10].segment.raw.len(), 200);
+        let joined: Vec<_> = segments
+            .iter()
+            .flat_map(|s| s.segment.raw[s.segment.overlap_samples..].iter().copied())
+            .collect();
+        assert_eq!(joined, samples);
+    }
+
     #[test]
     fn card_id_extracts_token() {
         assert_eq!(card_id("plughw:CARD=PCH,DEV=0"), Some("PCH"));
