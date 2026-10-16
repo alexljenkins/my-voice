@@ -30,6 +30,19 @@ RESULTS=docs/reviews/v1.txt SKIP_GOVERNOR=1 ./tools/bench-wer.sh
 
 Options are `ITERS`, `CORES`, `MODEL`, `MODELS`, `SAMPLES`, `RESULTS`, and `SKIP_GOVERNOR`. The accuracy test accepts `MY_VOICE_WER_SAMPLES`, `MY_VOICE_WER_MODEL`, `MY_VOICE_WER_QUANTIZED`, and `MY_VOICE_WER_MAX`.
 
+## Check Parakeet v2 F16
+
+Use the existing GGUF file directly with the same accuracy gate:
+
+```sh
+MY_VOICE_WER_MODEL=/home/alex/code/MODELS/parakeet-tdt-0.6b-v2-F16.gguf \
+  cargo test --features debug-tools --test wer -- --ignored --nocapture
+```
+
+The 2026-10-16 CUDA check passed all 30 recordings. Whole and segmented transcription both made 14/821 normalized errors, or 1.71% WER.
+Both made 49/821 strict errors. The CPU smoke check also transcribed a recording successfully, with 1569 MiB peak process RAM.
+The normal build uses CPU inference. The `cuda` feature builds NVIDIA acceleration when the toolkit is available.
+
 ## Add recordings
 
 ```sh

@@ -173,10 +173,11 @@ impl Config {
     }
 
     /// True if every file for the configured model variant is present on disk.
-    /// Returns false for unknown/custom models.
+    /// Custom GGUF paths count as installed when the file exists.
     pub fn is_model_downloaded(&self) -> bool {
         let Some(spec) = crate::models::find(&self.model) else {
-            return false;
+            let path = self.resolve_model();
+            return path.extension().is_some_and(|ext| ext == "gguf") && path.is_file();
         };
         let dir = self.resolved_model_dir().join(&self.model);
         if !dir.is_dir() {
@@ -190,7 +191,7 @@ impl Config {
         files.iter().all(|&(_, base)| dir.join(base).is_file())
     }
 
-    /// Map `model` → the Moonshine model directory. Does not check existence.
+    /// Map `model` to its model directory or custom path. Does not check existence.
     /// Named registry models live under `model_dir/<name>`; anything else is
     /// treated as a custom (tilde-expanded) path to a model directory.
     pub fn resolve_model(&self) -> PathBuf {
@@ -220,6 +221,40 @@ pub fn expand_tilde(s: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parakeet_requires_its_gguf_for_both_precision_settings() {
+        let root = std::env::temp_dir().join(format!("my-voice-parakeet-{}", std::process::id()));
+        let dir = root.join("parakeet-tdt-0.6b-v2");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut config = Config {
+            model: "parakeet-tdt-0.6b-v2".into(),
+            model_dir: root.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        assert_eq!(config.resolve_model(), dir);
+        assert!(!config.is_model_downloaded());
+        std::fs::write(dir.join(crate::models::PARAKEET_FILE), b"model").unwrap();
+        for quantized in [true, false] {
+            config.quantized = quantized;
+            assert!(config.is_model_downloaded());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn existing_custom_gguf_does_not_trigger_a_download() {
+        let path =
+            std::env::temp_dir().join(format!("my-voice-custom-{}.gguf", std::process::id()));
+        let config = Config {
+            model: path.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        assert!(!config.is_model_downloaded());
+        std::fs::write(&path, b"model").unwrap();
+        assert!(config.is_model_downloaded());
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn defaults_round_trip() {

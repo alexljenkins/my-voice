@@ -1113,6 +1113,7 @@ fn apply_reload(
         let label: &str = match new.model.as_str() {
             "moonshine-tiny" => "Switched to moonshine-tiny. Fastest, smallest download.",
             "moonshine-base" => "Switched to moonshine-base. Good balance of speed and accuracy.",
+            "parakeet-tdt-0.6b-v2" => "Switched to Parakeet v2 F16. English dictation.",
             "moonshine-streaming-medium" => {
                 "Switched to moonshine-streaming-medium. Highest accuracy."
             }

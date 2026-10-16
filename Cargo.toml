@@ -22,6 +22,7 @@ rubato = "0.14"          # sinc/FFT resampler (§8a)
 ort = { version = "2.0.0-rc.12", features = ["ndarray"] }
 ndarray = "0.16"
 tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+transcribe-cpp = { git = "https://github.com/handy-computer/transcribe.cpp", rev = "18947cf405f957195dd457db4e34c1cff9e88889" }
 
 # CLI + config
 clap = { version = "4", features = ["derive"] }
@@ -66,6 +67,8 @@ raw-window-handle = "0.6"
 
 [features]
 default = []
+# Optional NVIDIA acceleration for Parakeet. Requires the CUDA toolkit.
+cuda = ["transcribe-cpp/cuda"]
 # Capture/transcribe diagnostics (--test/--wav). Off by default — these add CLI
 # surface non-technical users don't need. Note: --record is always compiled since
 # it's useful for collecting WER samples without any model dependency.

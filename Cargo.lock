@@ -619,6 +619,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cmake"
+version = "0.1.58"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0f78a02292a74a88ac736019ab962ece0bc380e3f977bf72e376c5d78ff0678"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1971,6 +1980,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "transcribe-cpp",
  "ureq 2.12.1",
  "winit",
  "x11rb",
@@ -3959,6 +3969,25 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+]
+
+[[package]]
+name = "transcribe-cpp"
+version = "0.3.1"
+source = "git+https://github.com/handy-computer/transcribe.cpp?rev=18947cf405f957195dd457db4e34c1cff9e88889#18947cf405f957195dd457db4e34c1cff9e88889"
+dependencies = [
+ "log",
+ "thiserror 2.0.18",
+ "transcribe-cpp-sys",
+]
+
+[[package]]
+name = "transcribe-cpp-sys"
+version = "0.3.1"
+source = "git+https://github.com/handy-computer/transcribe.cpp?rev=18947cf405f957195dd457db4e34c1cff9e88889#18947cf405f957195dd457db4e34c1cff9e88889"
+dependencies = [
+ "cmake",
+ "serde_json",
 ]
 
 [[package]]

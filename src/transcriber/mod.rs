@@ -1,6 +1,7 @@
 //! Transcriber trait + backend factory.
 
 mod moonshine;
+mod parakeet;
 
 use anyhow::Result;
 use ort::environment::GlobalThreadPoolOptions;
@@ -69,14 +70,22 @@ pub trait Transcriber: Send {
     }
 }
 
-/// Build the Moonshine transcriber the config's `model` resolves to. The main
+/// Build the transcriber the config's `model` resolves to. The main
 /// loop owns it exclusively, so `&mut self` on `transcribe` needs no internal
 /// locking.
 pub fn create(config: &Config) -> Result<Box<dyn Transcriber>> {
-    let path = config.resolve_model();
-    if !path.exists() {
+    let mut path = config.resolve_model();
+    if !path.exists()
+        || (crate::models::find(&config.model).is_some() && !config.is_model_downloaded())
+    {
         tracing::info!("model not found — downloading {}...", config.model);
         crate::download::run(config)?;
+    }
+    if config.model == "parakeet-tdt-0.6b-v2" {
+        path = path.join(crate::models::PARAKEET_FILE);
+    }
+    if path.extension().is_some_and(|ext| ext == "gguf") {
+        return Ok(Box::new(parakeet::Parakeet::load(&path, config)?));
     }
     Ok(Box::new(moonshine::Moonshine::load(&path, config)?))
 }

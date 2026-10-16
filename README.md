@@ -11,11 +11,11 @@ Hold **CapsLock** and talk. my-voice types each completed phrase into the app yo
 
 ## Get started
 
-You need a microphone and [Rust](https://rustup.rs).
+You need a microphone, [Rust](https://rustup.rs), CMake, and a C++ compiler.
 
 ```bash
 # Install the Linux build tools
-sudo apt install libasound2-dev pkg-config
+sudo apt install libasound2-dev pkg-config cmake g++
 
 # Install Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -69,6 +69,31 @@ Hold **Shift+CapsLock** to copy the full dictation to the clipboard instead.
 Long dictation has no total duration limit. my-voice uses pauses to split speech into smaller sections. Continuous speech also splits automatically.
 
 ## Settings and help
+
+### Parakeet v2 F16
+
+Select **Parakeet v2 F16** from the tray model menu. It downloads about 1.24 GB of English speech weights.
+Moonshine base stays the default. Parakeet always uses F16, regardless of the `quantized` setting.
+
+Parakeet uses the pinned [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) Rust bindings.
+Cargo builds the native runtime. CPU inference works in the normal build.
+The optional `cuda` feature enables NVIDIA acceleration and requires the CUDA toolkit.
+
+```bash
+cargo install --path . --features cuda
+```
+
+To use the existing local weights without another download:
+
+```toml
+model = "/home/alex/code/MODELS/parakeet-tdt-0.6b-v2-F16.gguf"
+```
+
+The [Parakeet weights](https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v2-gguf) use CC-BY-4.0.
+They derive from NVIDIA's `parakeet-tdt-0.6b-v2`. The GGUF conversion is by handy-computer.
+Parakeet's CPU memory use can exceed the project's 500 MB target. GPU memory is separate.
+
+### General settings
 
 You can change the microphone, model, listening orb, typing mode, and startup behavior from the tray menu.
 

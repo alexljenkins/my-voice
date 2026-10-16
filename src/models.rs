@@ -1,7 +1,6 @@
 /// Static model registry — the single source of truth for every named model.
 ///
-/// Every model is Moonshine (ONNX). Adding a new auto-downloadable model means
-/// adding one entry here; no other files need touching.
+/// Moonshine uses ONNX directories. Parakeet uses one F16 GGUF file.
 pub type FileEntry = (&'static str, &'static str);
 
 pub struct ModelSpec {
@@ -30,6 +29,20 @@ pub struct ModelSpec {
 }
 
 pub static MODELS: &[ModelSpec] = &[
+    ModelSpec {
+        name: "parakeet-tdt-0.6b-v2",
+        label: "Parakeet v2  •  F16",
+        hf_repo: "handy-computer/parakeet-tdt-0.6b-v2-gguf",
+        files_quantized: PARAKEET_FILES,
+        files_full: PARAKEET_FILES,
+        sentinel_quantized: PARAKEET_FILE,
+        sentinel_full: PARAKEET_FILE,
+        checksums: &[(
+            PARAKEET_FILE,
+            "8440125213cb92625e3993ec751c3919dd329da9ae9149951cd6f95dd8bafe81",
+        )],
+        approx_mb: 1237,
+    },
     ModelSpec {
         name: "moonshine-tiny",
         label: "Faster  •  moonshine-tiny",
@@ -150,6 +163,9 @@ pub static MODELS: &[ModelSpec] = &[
         approx_mb: 366,
     },
 ];
+
+pub const PARAKEET_FILE: &str = "parakeet-tdt-0.6b-v2-F16.gguf";
+const PARAKEET_FILES: &[FileEntry] = &[(PARAKEET_FILE, PARAKEET_FILE)];
 
 // Merged-decoder layout: the split no-past/with-past pair was unified into one
 // `decoder_model_merged_quantized.onnx` (see model_scripts/). Same 3-file shape
