@@ -36,7 +36,15 @@ Options are `ITERS`, `CORES`, `MODEL`, `MODELS`, `SAMPLES`, `RESULTS`, and `SKIP
 ./target/release/my-voice --record samples/my-samples/
 ```
 
-Hold the push-to-talk key, speak, then release. Each hold saves one raw WAV and appends a model transcript to `expected.txt`. Listen to the recording and correct that transcript before using it as a reference. Stop the recorder with Ctrl+C.
+Quit the running daemon from its tray menu before starting recording mode. Hold the push-to-talk key, speak, then release. Each hold saves one raw WAV and appends the model transcript to both `expected.txt` and `transcribed.txt`. Correct only `expected.txt` before using it as a reference. Keep `transcribed.txt` as the original model output.
+
+Both files append new entries and preserve existing text. Recording mode plays each saved raw WAV after transcription finishes. It stops playback when you start the next recording. Playback uses PipeWire's `pw-play` command. Stop the recorder with Ctrl+C.
+
+To turn playback off:
+
+```sh
+./target/release/my-voice --record samples/my-samples/ --no-record-playback
+```
 
 Include recordings longer than 60 seconds to evaluate the 50–60 second split window. Existing short recordings check release behavior but cannot measure long boundary accuracy.
 
