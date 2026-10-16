@@ -1,0 +1,6 @@
+ControlGroup=/user.slice/user-1000.slice/user@1000.service/asr.slice/asr-eval.slice/parakeet-audio-244605.service
+CPUQuotaPerSecUSec=4s
+AllowedCPUs=2-5
+MemoryHigh=3221225472
+MemoryMax=4294967296
+MemorySwapMax=0

@@ -243,6 +243,21 @@ fn run_set_hotkey(config_path: Option<&Path>) -> Result<()> {
     }
 }
 
+/// Parakeet keeps raw resampled audio. Processing did not reduce measured WER.
+/// Moonshine retains its persistent WebRTC state and overlap handling.
+fn process_model_audio(
+    samples: &[f32],
+    overlap_samples: usize,
+    processor: &mut audio::CaptureProcessor,
+    raw_audio: bool,
+) -> Vec<f32> {
+    if raw_audio {
+        samples.to_vec()
+    } else {
+        processor.process_with_overlap(samples, overlap_samples)
+    }
+}
+
 /// Feed a wav file straight through the transcriber — isolates the inference
 /// path from the mic/capture path. Resamples to 16 kHz mono if needed.
 #[cfg(feature = "debug-tools")]
@@ -267,7 +282,14 @@ fn run_wav(config: &Config, path: &std::path::Path, iters: usize, segmented: boo
         .collect();
     let resampled = audio::resample(&mono, spec.sample_rate, 16_000);
     let raw_peak = resampled.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
-    let samples = (!segmented).then(|| audio::process_capture(&resampled, 16_000));
+    let samples = (!segmented).then(|| {
+        process_model_audio(
+            &resampled,
+            0,
+            &mut audio::CaptureProcessor::new(16_000),
+            config.uses_parakeet(),
+        )
+    });
     info!(
         "wav: {:.2}s, {} Hz → 16 kHz, {ch} ch → mono, raw peak {raw_peak:.3}, processed {:.2}s",
         mono.len() as f32 / spec.sample_rate as f32,
@@ -310,7 +332,12 @@ fn run_wav(config: &Config, path: &std::path::Path, iters: usize, segmented: boo
                     timed.segment.raw_rate,
                     16_000,
                 );
-                let processed = audio_processor.process_with_overlap(&resampled, overlap_samples);
+                let processed = process_model_audio(
+                    &resampled,
+                    overlap_samples,
+                    &mut audio_processor,
+                    config.uses_parakeet(),
+                );
                 let peak = processed.iter().fold(0.0f32, |a, b| a.max(b.abs()));
                 if timed.segment.observed_speech_ms == 0 || peak < 0.01 {
                     if let Some(chunk) = text_joiner.break_boundary() {
@@ -408,7 +435,12 @@ fn run_test(config: &Config) -> Result<()> {
     info!("recording 3s for --test...");
     recorder.start()?;
     thread::sleep(Duration::from_secs(3));
-    let samples = recorder.stop();
+    let samples = if config.uses_parakeet() {
+        let segment = recorder.stop_raw();
+        audio::resample(&segment.raw, segment.raw_rate, 16_000)
+    } else {
+        recorder.stop()
+    };
     let rate = recorder.target_rate();
     info!("captured {:.2}s", samples.len() as f32 / rate as f32);
     if let Err(e) = write_wav(&samples, rate, TEST_WAV) {
@@ -444,6 +476,7 @@ struct SegmentRequest {
     cache: Arc<ModelCache>,
     corrections: Vec<(String, String)>,
     record_dir: Option<PathBuf>,
+    raw_audio: bool,
 }
 
 struct SegmentResult {
@@ -477,11 +510,15 @@ impl WorkerAudioState {
         true
     }
 
-    fn process(&mut self, samples: &[f32], overlap_samples: usize) -> Vec<f32> {
-        self.processor
-            .as_mut()
-            .expect("begin_hold must run before audio processing")
-            .process_with_overlap(samples, overlap_samples)
+    fn process(&mut self, samples: &[f32], overlap_samples: usize, raw_audio: bool) -> Vec<f32> {
+        process_model_audio(
+            samples,
+            overlap_samples,
+            self.processor
+                .as_mut()
+                .expect("begin_hold must run before audio processing"),
+            raw_audio,
+        )
     }
 }
 
@@ -497,6 +534,7 @@ fn spawn_transcription_worker(tx: mpsc::Sender<DaemonMsg>) -> SyncSender<Segment
                 cache,
                 corrections,
                 record_dir,
+                raw_audio,
             } = request;
             debug!(?segment.reason, hold_id, segment_index, "processing audio segment");
             audio_state.begin_hold(hold_id);
@@ -516,7 +554,7 @@ fn spawn_transcription_worker(tx: mpsc::Sender<DaemonMsg>) -> SyncSender<Segment
             let resampled = audio::resample(&segment.raw, segment.raw_rate, 16_000);
             let overlap_samples =
                 audio::resampled_sample_count(segment.overlap_samples, segment.raw_rate, 16_000);
-            let processed = audio_state.process(&resampled, overlap_samples);
+            let processed = audio_state.process(&resampled, overlap_samples, raw_audio);
             let peak = processed.iter().fold(0.0f32, |a, b| a.max(b.abs()));
             let mut saved_recording = None;
             let text = if peak < 0.01 {
@@ -1413,6 +1451,7 @@ fn queue_segment(
         cache: Arc::clone(cache),
         corrections: config.corrections.clone(),
         record_dir: record_dir.clone(),
+        raw_audio: config.uses_parakeet(),
     };
     match tx.try_send(request) {
         Ok(()) => {
@@ -1713,6 +1752,30 @@ mod tests {
     }
 
     #[test]
+    fn parakeet_worker_preserves_levels_silence_and_repeated_context() {
+        let mut state = WorkerAudioState::new();
+        state.begin_hold(1);
+        let first = [0.0, 0.002, -0.003, 0.0];
+        assert_eq!(state.process(&first, 0, true), first);
+        let next = [-0.003, 0.0, 0.004, 0.0];
+        assert_eq!(state.process(&next, 2, true), next);
+    }
+
+    #[test]
+    fn moonshine_worker_keeps_existing_processing_across_segments() {
+        let mut state = WorkerAudioState::new();
+        state.begin_hold(1);
+        let mut existing = audio::CaptureProcessor::new(16_000);
+        let samples: Vec<_> = (0..4_800).map(|i| (i as f32 * 0.1).sin() * 0.1).collect();
+        for overlap in [0, 1_600] {
+            assert_eq!(
+                state.process(&samples, overlap, false),
+                existing.process_with_overlap(&samples, overlap),
+            );
+        }
+    }
+
+    #[test]
     fn worker_audio_state_resets_only_between_holds() {
         let mut state = WorkerAudioState::new();
 
@@ -1826,6 +1889,7 @@ mod tests {
                 cache,
                 corrections: Vec::new(),
                 record_dir: Some(dir.clone()),
+                raw_audio: config.uses_parakeet(),
             })
             .unwrap();
 

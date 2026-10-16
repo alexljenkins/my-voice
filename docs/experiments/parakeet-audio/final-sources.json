@@ -1,0 +1,8 @@
+{
+  "Cargo.lock": "2532e96b471ce1b90dc97992eac2aec835d332a1e8ecb1437f3e2757b51603e1",
+  "src/config.rs": "684152bcd1b7f1b8d6ea37f7c40162bfe621bb12d6c6d7c917a44e17fb090d8f",
+  "src/main.rs": "256f99fa5f77ecf733a0e58835354dae0313ba14c19aa45986d0c32434d2f686",
+  "src/audio.rs": "7c18487b612ca6282c9cd026bc17736c2d718d77af246ab5ab0904c4fa29c94f",
+  "src/transcriber/parakeet.rs": "832801dacf6655be1a4ff96021ef1561b48b50ebd4484dbf17cb7f4be1e49247",
+  "target/parakeet-audio/release/my-voice": "d33d3fe78d18f728f707d2d2b2a5b491e0d968fd328173d5138292f943c89424"
+}

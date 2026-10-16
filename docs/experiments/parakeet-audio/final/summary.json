@@ -1,0 +1,158 @@
+[
+  {
+    "variant": "raw",
+    "mode": "whole",
+    "cohort": "all",
+    "coverage": 30,
+    "normalized": {
+      "errors": 14,
+      "reference_words": 821,
+      "substitutions": 12,
+      "deletions": 1,
+      "insertions": 1,
+      "wer": 0.01705237515225335
+    },
+    "strict": {
+      "errors": 55,
+      "reference_words": 821,
+      "substitutions": 53,
+      "deletions": 1,
+      "insertions": 1,
+      "wer": 0.06699147381242387
+    },
+    "summed_second_pass_ms": 14113,
+    "median_second_pass_ms": 332.0,
+    "peak_rss_kib": 388652,
+    "wall_seconds": 44.5682549669873
+  },
+  {
+    "variant": "raw",
+    "mode": "whole",
+    "cohort": "original",
+    "coverage": 16,
+    "normalized": {
+      "errors": 5,
+      "reference_words": 395,
+      "substitutions": 4,
+      "deletions": 0,
+      "insertions": 1,
+      "wer": 0.012658227848101266
+    },
+    "strict": {
+      "errors": 20,
+      "reference_words": 395,
+      "substitutions": 19,
+      "deletions": 0,
+      "insertions": 1,
+      "wer": 0.05063291139240506
+    },
+    "summed_second_pass_ms": 7102,
+    "median_second_pass_ms": 225.0,
+    "peak_rss_kib": 369932,
+    "wall_seconds": 22.860128313986934
+  },
+  {
+    "variant": "raw",
+    "mode": "whole",
+    "cohort": "added",
+    "coverage": 14,
+    "normalized": {
+      "errors": 9,
+      "reference_words": 426,
+      "substitutions": 8,
+      "deletions": 1,
+      "insertions": 0,
+      "wer": 0.02112676056338028
+    },
+    "strict": {
+      "errors": 35,
+      "reference_words": 426,
+      "substitutions": 34,
+      "deletions": 1,
+      "insertions": 0,
+      "wer": 0.08215962441314555
+    },
+    "summed_second_pass_ms": 7011,
+    "median_second_pass_ms": 387.5,
+    "peak_rss_kib": 388652,
+    "wall_seconds": 21.708126653000363
+  },
+  {
+    "variant": "raw",
+    "mode": "segmented",
+    "cohort": "all",
+    "coverage": 30,
+    "normalized": {
+      "errors": 14,
+      "reference_words": 821,
+      "substitutions": 12,
+      "deletions": 1,
+      "insertions": 1,
+      "wer": 0.01705237515225335
+    },
+    "strict": {
+      "errors": 55,
+      "reference_words": 821,
+      "substitutions": 53,
+      "deletions": 1,
+      "insertions": 1,
+      "wer": 0.06699147381242387
+    },
+    "summed_second_pass_ms": 15492,
+    "median_second_pass_ms": 344.0,
+    "peak_rss_kib": 392496,
+    "wall_seconds": 46.263212290999945
+  },
+  {
+    "variant": "raw",
+    "mode": "segmented",
+    "cohort": "original",
+    "coverage": 16,
+    "normalized": {
+      "errors": 5,
+      "reference_words": 395,
+      "substitutions": 4,
+      "deletions": 0,
+      "insertions": 1,
+      "wer": 0.012658227848101266
+    },
+    "strict": {
+      "errors": 20,
+      "reference_words": 395,
+      "substitutions": 19,
+      "deletions": 0,
+      "insertions": 1,
+      "wer": 0.05063291139240506
+    },
+    "summed_second_pass_ms": 4328,
+    "median_second_pass_ms": 233.0,
+    "peak_rss_kib": 375768,
+    "wall_seconds": 17.37911974000599
+  },
+  {
+    "variant": "raw",
+    "mode": "segmented",
+    "cohort": "added",
+    "coverage": 14,
+    "normalized": {
+      "errors": 9,
+      "reference_words": 426,
+      "substitutions": 8,
+      "deletions": 1,
+      "insertions": 0,
+      "wer": 0.02112676056338028
+    },
+    "strict": {
+      "errors": 35,
+      "reference_words": 426,
+      "substitutions": 34,
+      "deletions": 1,
+      "insertions": 0,
+      "wer": 0.08215962441314555
+    },
+    "summed_second_pass_ms": 11164,
+    "median_second_pass_ms": 541.0,
+    "peak_rss_kib": 392496,
+    "wall_seconds": 28.884092550993955
+  }
+]

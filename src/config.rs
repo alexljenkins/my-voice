@@ -138,6 +138,15 @@ impl Config {
         }
     }
 
+    /// Match the named Parakeet model and the custom GGUF backend route.
+    pub fn uses_parakeet(&self) -> bool {
+        self.model == "parakeet-tdt-0.6b-v2"
+            || self
+                .resolve_model()
+                .extension()
+                .is_some_and(|ext| ext == "gguf")
+    }
+
     /// Resolve `threads`: 0 = auto = min(num_cpus, 8). Measured on an 8-logical
     /// (4-physical) i7-8565U: 8 intra-op threads cut encode ~10% vs 4 with no
     /// decode change, so SMT oversubscription helps; capped at 8 since wide
@@ -221,6 +230,23 @@ pub fn expand_tilde(s: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_choice_matches_named_and_custom_backends() {
+        for (model, expected) in [
+            ("parakeet-tdt-0.6b-v2", true),
+            ("/models/custom.gguf", true),
+            ("~/models/custom.gguf", true),
+            ("moonshine-base", false),
+            ("moonshine-streaming-medium", false),
+        ] {
+            let config = Config {
+                model: model.into(),
+                ..Config::default()
+            };
+            assert_eq!(config.uses_parakeet(), expected, "{model}");
+        }
+    }
 
     #[test]
     fn parakeet_requires_its_gguf_for_both_precision_settings() {

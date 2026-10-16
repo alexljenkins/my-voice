@@ -1,0 +1,162 @@
+    Blocking waiting for file lock on build directory
+   Compiling my-voice v0.1.0 (/home/alex/.t3/worktrees/my-voice/t3-bfbce355)
+    Finished `release` profile [optimized] target(s) in 2m 28s
+     Running unittests src/main.rs (target/parakeet-audio/release/deps/my_voice-426193b6b87b3721)
+
+running 144 tests
+test audio::tests::append_mono_recovers_from_poison ... ok
+test audio::tests::apm_empty_passthrough ... ok
+test audio::tests::append_mono_flags_capacity_without_dropping_samples ... ok
+test audio::tests::append_publishes_visual_level_without_consuming_audio ... ok
+test audio::tests::hard_limit_splits_continuous_speech_and_silence ... ok
+test audio::tests::card_id_extracts_token ... ok
+test audio::tests::continuous_speech_has_no_overlap_fallback ... ok
+test audio::tests::format_rank_prefers_cleanest ... ok
+test audio::tests::lock_buf_recovers_from_poison ... ok
+test audio::tests::normalization_raises_quiet_audio_with_a_cap ... ok
+test audio::tests::long_wav_splits_at_sixty_seconds_without_losing_its_tail ... ok
+test audio::tests::normalization_reduces_overshoot ... ok
+test audio::tests::high_level_labels ... ok
+test audio::tests::overlap_segment_gets_one_combined_trim ... ok
+test audio::tests::overlap_starts_at_pause_before_final_word ... ok
+test audio::tests::pause_requirement_shrinks_linearly_from_fifty_to_sixty_seconds ... ok
+test audio::tests::apm_bounds ... ok
+test audio::tests::pauses_cannot_split_before_fifty_seconds ... ok
+test audio::tests::resample_downsample_length ... ok
+test audio::tests::resample_empty ... ok
+test audio::tests::resample_identity ... ok
+test audio::tests::resample_sine_continuity ... ok
+test audio::tests::resampled_count_maps_overlap_prefix ... ok
+test audio::tests::routine_poll_delay_past_sixty_seconds_is_not_capture_overflow ... ok
+test audio::tests::apm_preserves_length ... ok
+test audio::tests::short_wav_waits_for_release_despite_long_pauses ... ok
+test audio::tests::wav_forced_split_after_overlap_never_exceeds_sixty_seconds ... ok
+test audio::tests::late_poll_drains_exactly_sixty_seconds_and_keeps_overflow ... ok
+test config::tests::audio_choice_matches_named_and_custom_backends ... ok
+test config::tests::corrections_round_trip ... ok
+test config::tests::defaults_round_trip ... ok
+test config::tests::existing_custom_gguf_does_not_trigger_a_download ... ok
+test config::tests::malformed_default_config_falls_back_to_defaults ... ok
+test audio::tests::wav_split_preserves_overlap_and_every_new_sample ... ok
+test config::tests::model_resolution_custom_path ... ok
+test config::tests::malformed_explicit_config_errors ... ok
+test config::tests::model_resolution_named ... ok
+test audio::tests::ten_minute_dictation_keeps_every_sample_and_the_release_tail ... ok
+test config::tests::parakeet_requires_its_gguf_for_both_precision_settings ... ok
+test config::tests::parses_indicator_style ... ok
+test config::tests::partial_config_keeps_defaults ... ok
+test download::tests::backoff_is_exponential ... ok
+test config::tests::threads_auto_caps_at_eight ... ok
+test config::tests::tilde_expansion ... ok
+test download::tests::install_atomic_adds_fp32_files_without_removing_int8 ... ok
+test download::tests::install_atomic_does_not_download_complete_variant ... ok
+test download::tests::install_atomic_failure_creates_no_final_dir ... ok
+test download::tests::retry_is_bounded_and_surfaces_last_error ... ok
+test download::tests::retry_recovers_on_a_later_attempt ... ok
+test download::tests::retry_returns_first_success_without_sleeping ... ok
+test download::tests::stream_body_accepts_complete_stream ... ok
+test hotkey::linux::tests::evdev_parses_capslock_variants ... ok
+test hotkey::linux::tests::evdev_parses_fkeys ... ok
+test download::tests::stream_body_rejects_truncated_stream ... ok
+test hotkey::linux::tests::evdev_parses_popup_tokens ... ok
+test hotkey::linux::tests::hotkey_combo_parses ... ok
+test hotkey::linux::tests::mods_satisfied_subset ... ok
+test hotkey::linux::tests::x11_keysym_capslock ... ok
+test hotkey::linux::tests::x11_keysym_fkeys ... ok
+test hotkey::linux::tests::x11_keysym_modifiers ... ok
+test hotkey::linux::tests::x11_keysym_rejects_unknown ... ok
+test hotkey::linux::tests::x11_parses_popup_tokens ... ok
+test indicator::tests::corner_rounding_moves_peaks_toward_neighbours ... ok
+test indicator::tests::fixed_style_does_not_change ... ok
+test indicator::tests::live_overlay_is_viewable_and_has_no_input_region ... ignored, requires a live X11 or XWayland display
+test indicator::tests::random_never_selects_random ... ok
+test indicator::tests::random_selection_can_reach_every_named_style ... ok
+test indicator::tests::show_and_hide_transitions_keep_the_recording_style ... ok
+test indicator::tests::window_centers_above_the_selected_displays_bottom_edge ... ok
+test audio::tests::release_just_after_sixty_seconds_splits_at_the_limit ... ok
+test injector::linux::tests::binary_probe_absent ... ok
+test injector::linux::tests::chain_empty_when_no_session_and_no_tools ... ok
+test injector::linux::tests::binary_probe_present ... ok
+test hotkey::linux::tests::evdev_rejects_unknown ... ok
+test injector::linux::tests::detect_session_no_panic ... ok
+test injector::linux::tests::clipboard_injector_name ... ok
+test injector::linux::tests::external_typers_use_fast_reliable_delays ... ok
+test model_cache::tests::load_warms_once ... ok
+test model_cache::tests::default_warm_calls_transcribe ... ok
+test audio::tests::overlap_does_not_advance_persistent_apm_twice ... ok
+test model_cache::tests::zero_timeout_keeps_one_model_for_each_segmented_hold ... ok
+test tests::boundary_punctuation_attaches_to_the_previous_typed_word ... ok
+test model_cache::tests::poisoned_slot_recovers_and_rebuilds ... ok
+test tests::cli_definition_is_valid ... ok
+test audio::tests::persistent_apm_matches_contiguous_frame_processing ... ok
+test model_cache::tests::poisoned_slot_recovers_in_ensure_loaded ... ok
+test tests::device_change_rebuilds_recorder_only ... ok
+test tests::failed_segment_does_not_suppress_later_transcripts ... ok
+test tests::hotkey_or_grab_change_forces_restart ... ok
+test tests::injection_change_rebuilds_injector_only ... ok
+test tests::model_fields_rebuild_cache ... ok
+test tests::no_change_reloads_nothing ... ok
+test tests::parakeet_worker_preserves_levels_silence_and_repeated_context ... ok
+test tests::recording_appends_labels_and_preserves_corrected_references ... ok
+test tests::recording_playback_is_default_and_can_be_disabled ... ok
+test model_cache::tests::evict_thread_exits_on_shutdown ... ok
+test tests::busy_event_queue_cannot_postpone_capture_poll ... ok
+test tests::status_line_reflects_liveness ... ok
+test tests::release_merge_keeps_all_captured_audio ... ok
+test tests::typed_segments_are_incremental_and_joined_once ... ok
+test tests::silent_release_segment_is_not_processed_or_saved ... ok
+test text::tests::a_segment_without_audio_overlap_keeps_both_words ... ok
+test text::tests::boundary_join_always_drops_the_first_overlap_word_on_mismatch ... ok
+test text::tests::boundary_join_ignores_leading_punctuation_and_capitalization ... ok
+test text::tests::boundary_join_keeps_exact_left_spelling ... ok
+test text::tests::boundary_join_keeps_left_word_and_new_punctuation ... ok
+test text::tests::boundary_join_keeps_punctuation_after_a_mismatched_overlap_word ... ok
+test text::tests::boundary_join_uses_a_two_word_alignment ... ok
+test text::tests::collapses_newlines ... ok
+test text::tests::corrections_case_insensitive ... ok
+test tests::worker_audio_state_resets_only_between_holds ... ok
+test text::tests::corrections_longest_match_first ... ok
+test text::tests::corrections_multi_word_pattern ... ok
+test text::tests::diagnostic_join_marks_an_overlap_mismatch_without_merging_it ... ok
+test text::tests::diagnostic_join_marks_both_sides_of_a_two_word_alignment ... ok
+test text::tests::diagnostic_join_marks_each_confirmed_audio_overlap ... ok
+test text::tests::empty_corrections_is_noop ... ok
+test text::tests::empty_transcript_breaks_the_pending_boundary ... ok
+test text::tests::failed_transcript_breaks_the_pending_boundary ... ok
+test text::tests::corrections_respect_word_boundaries ... ok
+test text::tests::nonfinal_segment_emits_its_last_word_without_punctuation ... ok
+test text::tests::overlap_only_segment_holds_its_punctuation ... ok
+test text::tests::preserves_visible_unicode ... ok
+test text::tests::normalizes_curly_quotes ... ok
+test text::tests::strips_invisible_and_bom ... ok
+test text::tests::trims_whitespace ... ok
+test transcriber::moonshine::tests::argmax_skips_suppressed ... ok
+test transcriber::moonshine::tests::loop_detection_allows_double_phrase ... ok
+test transcriber::moonshine::tests::loop_detection_allows_normal_text ... ok
+test transcriber::moonshine::tests::loop_detection_allows_repeated_word ... ok
+test transcriber::moonshine::tests::loop_detection_collapses_cycle ... ok
+test transcriber::moonshine::tests::max_tokens_ceiling ... ok
+test transcriber::moonshine::tests::max_tokens_floor ... ok
+test transcriber::moonshine::tests::max_tokens_normal ... ok
+test transcriber::moonshine::tests::runaway_collapse_keeps_one_cycle ... ok
+test transcriber::moonshine::tests::runaway_collapse_leaves_normal_text ... ok
+gguf_init_from_reader: invalid magic characters: 'not ', expected 'GGUF'
+test transcriber::parakeet::tests::invalid_gguf_returns_a_load_error ... ok
+test transcriber::tests::global_thread_pool_commits_once ... ok
+test text::tests::release_flushes_the_held_punctuation ... ok
+test tests::moonshine_worker_keeps_existing_processing_across_segments ... ok
+test tests::completions_and_man_generate_nonempty ... ok
+test indicator::tests::loudness_changes_rendered_contour ... ok
+test text::tests::diagnostic_join_flushes_a_segment_when_the_boundary_breaks ... ok
+test transcriber::tests::oversized_audio_reaches_inference_in_order_without_loss ... ok
+
+test result: ok. 143 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.17s
+
+     Running tests/wer.rs (target/parakeet-audio/release/deps/wer-806704af74880c77)
+
+running 3 tests
+test samples_wer ... ignored, needs a downloaded model; run with --ignored
+test edit_distance_basics ... ok
+test strict_sees_case_and_punctuation ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s

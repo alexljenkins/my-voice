@@ -1,0 +1,34 @@
+diff --git a/src/audio.rs b/src/audio.rs
+index 4f44ee5..d8711a8 100644
+--- a/src/audio.rs
++++ b/src/audio.rs
+@@ -808,6 +808,7 @@ impl CaptureProcessor {
+
+     /// Run APM, normalize peak level, then trim silence from this segment.
+     pub fn process(&mut self, samples: &[f32]) -> Vec<f32> {
++        if let Some(output) = experiment_audio(samples, self.sample_rate) { return output; }
+         let processed = self.apply_audio_processing(samples);
+         finalize_processed(processed, self.sample_rate)
+     }
+@@ -815,6 +816,7 @@ impl CaptureProcessor {
+     /// Process repeated boundary context without replaying it through this
+     /// hold's persistent APM state.
+     pub fn process_with_overlap(&mut self, samples: &[f32], overlap_samples: usize) -> Vec<f32> {
++        if let Some(output) = experiment_audio(samples, self.sample_rate) { return output; }
+         let split = overlap_samples.min(samples.len());
+         if split == 0 {
+             return self.process(samples);
+@@ -1521,3 +1523,13 @@ mod tests {
+         assert!(peak > 0.5, "resampled sine lost amplitude: {peak}");
+     }
+ }
++
++// Temporary measurement hook. Removed before delivery, preserved in experiment.patch.
++fn experiment_audio(samples: &[f32], rate: u32) -> Option<Vec<f32>> {
++    match std::env::var("MY_VOICE_AUDIO_EXPERIMENT").ok().as_deref() {
++        Some("raw") => Some(samples.to_vec()),
++        Some("peak") => { let mut out = samples.to_vec(); normalize_peak(&mut out); Some(out) },
++        Some("peak-trim") => Some(finalize_processed(samples.to_vec(), rate)),
++        _ => None,
++    }
++}

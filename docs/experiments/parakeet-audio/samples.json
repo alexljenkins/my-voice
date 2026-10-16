@@ -1,0 +1,272 @@
+[
+  {
+    "file": "1788393118159_1_raw.wav",
+    "reference": "I just wanted to record a few samples to make sure that audio is working correctly.",
+    "sha256": "0cd0a6a381b1f7879b20f6b0ac471d68b4d7054f09300972efaaf2c7b6fb6833",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 5.2463125,
+    "cohort": "original"
+  },
+  {
+    "file": "1788393187800_2_raw.wav",
+    "reference": "I want to build out a new feature that takes in users' ideas and spits out a conference score on how to monetize it and make it go viral.",
+    "sha256": "52069793cc523f88999f753ceba7611b2556df23a690f8280473051fa777bf89",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 17.619625,
+    "cohort": "original"
+  },
+  {
+    "file": "1788393284670_3_raw.wav",
+    "reference": "Write a design doc on how to optimize this repo.",
+    "sha256": "3ff6bd9419d59e1df0ec89b29454071f3d7692db11aacfd99801872923b8e670",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 3.923625,
+    "cohort": "original"
+  },
+  {
+    "file": "1788393325918_4_raw.wav",
+    "reference": "What are your next suggestions for improvements that we could make?",
+    "sha256": "7aaeaf1ad107241fab58fee8519a7a429cbeb43004b0e76ca0d7c1ea2b09d4c7",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 4.0943125,
+    "cohort": "original"
+  },
+  {
+    "file": "1788393384712_5_raw.wav",
+    "reference": "Now that we have segmented and raw audio files, do we need to change the pipeline to test these?",
+    "sha256": "11617b6aa24c96564cd5a52bcd45b11aaefbde7cc3d81e4e63ee0f9feceaba75",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 8.7449375,
+    "cohort": "original"
+  },
+  {
+    "file": "1788393462054_6_raw.wav",
+    "reference": "What command do we run to test the new my samples files?",
+    "sha256": "da384cc7d34f1ef61ebea0ef9055a10a1a2ac954d6a880141f92f8bbc561d2d4",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 5.7583125,
+    "cohort": "original"
+  },
+  {
+    "file": "1788397029129_7_raw.wav",
+    "reference": "Here we don't actually have to hide the percentages.",
+    "sha256": "878b17da98703d17bc6221d3e0e07f31d4044e16c0e02c9eeaf1cc8882a296ae",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 4.5209375,
+    "cohort": "original"
+  },
+  {
+    "file": "1788398312789_9_raw.wav",
+    "reference": "I'm hesitant to add a five second minimum because if somebody speaks and then pauses, I want it to come out.",
+    "sha256": "d44322358b6e17d53a7915fc69c56b9a44adab8b1d1a09b4540b533aa604b10c",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 9.8543125,
+    "cohort": "original"
+  },
+  {
+    "file": "1788398358424_10_raw.wav",
+    "reference": "But maybe when it's under three seconds, the pause or gap required is much higher than it currently is.",
+    "sha256": "d79bca6298de31c13f61f99127f63cb94dfd88b83ef07daeb29d931c14f2cc98",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 10.451625,
+    "cohort": "original"
+  },
+  {
+    "file": "1788492845171_1_raw.wav",
+    "reference": "Here I just wanted to check if I hold off a little bit and talk, if everything goes as planned. That way I can look at punctuation, spelling and overall accuracy when the model segments",
+    "sha256": "e4656bd01528e7f9f588e75f9169a33b1390aeb5c89f7914337c4b4f8987407c",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 23.507625,
+    "cohort": "original"
+  },
+  {
+    "file": "1788492941831_2_raw.wav",
+    "reference": "There are lots of variables to consider: PI rank, mission rank, operational priority, KTLO, features, dependencies and more.",
+    "sha256": "6a031bdedf292235c7efe1ee0c12f0790987c4fd3dc14168a5191767ab1ab404",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 20.5209375,
+    "cohort": "original"
+  },
+  {
+    "file": "1788492990002_3_raw.wav",
+    "reference": "I wonder if there's a clear and simple answer to how I'm able to get so much value out of such a small model.",
+    "sha256": "036a072d4a4e47d6919eb49e7fce681cf39400f408ca66da5570f5069db5e0c9",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 14.675625,
+    "cohort": "original"
+  },
+  {
+    "file": "1788493041835_4_raw.wav",
+    "reference": "Having it delay now so much and not just spitting out the answer. It's actually really good and makes transcription way, way better. Maybe I should have just removed this from the start instead of hoping for the best with segmentation and cutting up the text and audio randomly as I saw fit. Hopefully this is way better. But I wonder if it can transcribe all the way to the end.",
+    "sha256": "a914ffbcd7f7132c1dd71cd89045cc1fb58754e155481ee8a29490320a209c82",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 34.9423125,
+    "cohort": "original"
+  },
+  {
+    "file": "1788493297979_5_raw.wav",
+    "reference": "Actually, I think we need to edit the transcription again with one more caveat so that it's break context from the first audio file that we're saying is double up. Double line. Then the utterance from the second audio file that we're saying is the same as the first so that we can compare old new directly.",
+    "sha256": "75956c19bd584b80f626ecf1d0fc24af72507c075a047524462b7e1f8fe93232",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 39.635625,
+    "cohort": "original"
+  },
+  {
+    "file": "1788493516191_6_raw.wav",
+    "reference": "That way I'll have a way to really break up the files based on how well the segmentation works.",
+    "sha256": "36dbab858aa3f2078a4149902c815820a76b832f28c033a1bab37aa646638f63",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 17.4063125,
+    "cohort": "original"
+  },
+  {
+    "file": "1788493634661_7_raw.wav",
+    "reference": "I think it will be good to have all of these samples so that you can optimize things and test different settings and pre-cleaning etc.",
+    "sha256": "43234227fdbfad07ca2190bd692c14078ccfd113c1ce035f9026df24ee7fabd4",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 19.219625,
+    "cohort": "original"
+  },
+  {
+    "file": "1791520856783_1_raw.wav",
+    "reference": "Okay, next I want to test if a Qwen model might be better at transcribing than anything else. I'm not really sure what tests to run though.",
+    "sha256": "a9d7ad09a6b88d3b695c177dfc50b5c0b37a8637780c9d7a1e7dc4673bbe0ed4",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 14.163625,
+    "cohort": "added"
+  },
+  {
+    "file": "1791521348332_1_raw.wav",
+    "reference": "Okay, different pages will have different goals and objectives and things to show and particularly drill down pages should focus on the data, the insights, the aggregations rather than recommendations or the exact outcome that we suggest.",
+    "sha256": "1f3f161c9e981512c2444c5e008d28bec682f535e5e0625376b604ef13dacce3",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 26.579625,
+    "cohort": "added"
+  },
+  {
+    "file": "1791521588897_2_raw.wav",
+    "reference": "I've opened up the app locally inside a brave agent.",
+    "sha256": "6a2322729b49c481451bddc6ace7bc944b86188b2e5aed3ef4f23ca2de47a33d",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 13.907625,
+    "cohort": "added"
+  },
+  {
+    "file": "1791521629925_3_raw.wav",
+    "reference": "explore around looking at the other pages and grabbing the intense style themes, info from them as well to help draw your pillar conclusions to what we should move towards, what rules or objectives should be based.",
+    "sha256": "b0cd885fc63e0ce38ebc4b9f55e2b2312fe1457488d37863fbd4ba89264b0a70",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 27.475625,
+    "cohort": "added"
+  },
+  {
+    "file": "1791521708877_1_raw.wav",
+    "reference": "Make sure you relate this back to the research, these optimal standards and styles, and the direction big enterprise software is and is going for enterprise customers.",
+    "sha256": "2a0c2c1f806fe0056280fe77407e1781252b8e0fcb970b499dec520161b8ad41",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 22.0569375,
+    "cohort": "added"
+  },
+  {
+    "file": "1791522202109_2_raw.wav",
+    "reference": "The demo banner is there when we're in demo mode, so that we and users know that we're not in a client environment and they know they're not in a client environment.",
+    "sha256": "196cd262337072d9a48ed49d3d922947d010c57b8239fca529df1889c1346bfa",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 10.2383125,
+    "cohort": "added"
+  },
+  {
+    "file": "1791522263119_3_raw.wav",
+    "reference": "This is where demo numbers and fake data and the likes exist. But even in the real production environment, there are separations between aggregated log data,",
+    "sha256": "183d3e93678da60bbb534c80f1d61264952d9a2602d70cb2d3757cfba4b56281",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 19.923625,
+    "cohort": "added"
+  },
+  {
+    "file": "1791522336559_4_raw.wav",
+    "reference": "labels for that data and then more recommendations or potential insights or related findings from studies and research and our standardized templates for workflows.",
+    "sha256": "6dc356109e3a3695c8e69f3cb2383eb2ec73b9291c4de231a8307a77921b71fc",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 31.571625,
+    "cohort": "added"
+  },
+  {
+    "file": "1791522429689_5_raw.wav",
+    "reference": "distinguish between while keeping them in their relevant spots close to the information. For example, how automatable a task is is from a research study, how automated their process is on that task, their actual logs tell us",
+    "sha256": "84f55f99e14774c3c6c25922a0f7368336d625abc92c6253668ebfaadefcaada",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 30.1209375,
+    "cohort": "added"
+  },
+  {
+    "file": "1791522603949_6_raw.wav",
+    "reference": "This occurs multiple times all over the place. And keeping this separation, I'm not sure how to do.",
+    "sha256": "125f015bb664ca186d7a609f981bcd7e010248ed250e3a039045b13b932129fb",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 14.291625,
+    "cohort": "added"
+  },
+  {
+    "file": "1791523197154_7_raw.wav",
+    "reference": "Help me try and clarify the core pillars of what enterprise software and look and feel and design systems and function verse form,",
+    "sha256": "b3244884c8a03a6c631e16c466c1411078598610206c3c1dc0acedec63be87d1",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 18.6009375,
+    "cohort": "added"
+  },
+  {
+    "file": "1791523252292_8_raw.wav",
+    "reference": "should look like in our app prompt leash AI. I've currently got it up in a brave agent with the debug port open so you can have a look around.",
+    "sha256": "081e0cac0cc527ab6e62c372c68fcd9cfd223e498364078642009b2ee596e20d",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 18.3449375,
+    "cohort": "added"
+  },
+  {
+    "file": "1791523530647_9_raw.wav",
+    "reference": "one important note or example that I want to understand clearly that these pillars would guide and dictate to is how to present data to users either through their data versus industry data or research data or something versus our standards or insights or tooling or projected or something so that different levels of trust and then their ability to identify their data very, very quickly versus template data or industry data.",
+    "sha256": "488d065d54bfda61ee3ffd39fff3eea5f716b80154ae6d67ccce1a7643bdde05",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 56.403625,
+    "cohort": "added"
+  },
+  {
+    "file": "1791523682725_10_raw.wav",
+    "reference": "or something so that different levels of trust and then their ability to identify their data very, very quickly versus template data or industry data.",
+    "sha256": "9a61c535f47d560f045e6fae505f134d42c709bfefa77ea0adbbee3c62dc08cf",
+    "rate": 16000,
+    "channels": 1,
+    "seconds": 16.7663125,
+    "cohort": "added"
+  }
+]

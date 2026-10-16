@@ -1,0 +1,66 @@
+Running as unit: parakeet-audio-289250.service; invocation ID: e9550b13c128435eadf2cb23b53c1af2
+raw whole 1 0
+raw whole 2 1
+raw whole 3 0
+raw whole 4 0
+raw whole 5 1
+raw whole 6 0
+raw whole 7 0
+raw whole 8 0
+raw whole 9 0
+raw whole 10 0
+raw whole 11 0
+raw whole 12 0
+raw whole 13 1
+raw whole 14 1
+raw whole 15 0
+raw whole 16 1
+raw whole 17 1
+raw whole 18 0
+raw whole 19 0
+raw whole 20 2
+raw whole 21 1
+raw whole 22 1
+raw whole 23 0
+raw whole 24 0
+raw whole 25 0
+raw whole 26 0
+raw whole 27 1
+raw whole 28 2
+raw whole 29 1
+raw whole 30 0
+raw segmented 1 0
+raw segmented 2 1
+raw segmented 3 0
+raw segmented 4 0
+raw segmented 5 1
+raw segmented 6 0
+raw segmented 7 0
+raw segmented 8 0
+raw segmented 9 0
+raw segmented 10 0
+raw segmented 11 0
+raw segmented 12 0
+raw segmented 13 1
+raw segmented 14 1
+raw segmented 15 0
+raw segmented 16 1
+raw segmented 17 1
+raw segmented 18 0
+raw segmented 19 0
+raw segmented 20 2
+raw segmented 21 1
+raw segmented 22 1
+raw segmented 23 0
+raw segmented 24 0
+raw segmented 25 0
+raw segmented 26 0
+raw segmented 27 1
+raw segmented 28 2
+raw segmented 29 1
+raw segmented 30 0
+          Finished with result: success
+Main processes terminated with: code=exited, status=0/SUCCESS
+               Service runtime: 1min 30.968s
+             CPU time consumed: 2min 45.103s
+                   Memory peak: 226.8M (swap: 0B)

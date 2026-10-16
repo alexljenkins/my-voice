@@ -74,6 +74,7 @@ Long dictation has no total duration limit. my-voice uses pauses to split speech
 
 Select **Parakeet v2 F16** from the tray model menu. It downloads about 1.24 GB of English speech weights.
 Moonshine base stays the default. Parakeet always uses F16, regardless of the `quantized` setting.
+Parakeet receives raw audio after resampling. Moonshine keeps its existing noise suppression, gain control, normalization, and trimming.
 
 Parakeet uses the pinned [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) Rust bindings.
 Cargo builds the native runtime. CPU inference works in the normal build.

@@ -1,0 +1,3 @@
+model = "/home/alex/code/MODELS/parakeet-tdt-0.6b-v2-F16.gguf"
+threads = 4
+corrections = []
