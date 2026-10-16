@@ -14,3 +14,17 @@
 1788493297979_5_raw.wav	Actually, I think we need to edit the transcription again with one more caveat so that it's break context from the first audio file that we're saying is double up. Double line. Then the utterance from the second audio file that we're saying is the same as the first so that we can compare old new directly.
 1788493516191_6_raw.wav	That way I'll have a way to really break up the files based on how well the segmentation works.
 1788493634661_7_raw.wav	I think it will be good to have all of these samples so that you can optimize things and test different settings and pre-cleaning etc.
+1791520856783_1_raw.wav	Okay, next I want to test if a Qwen model might be better at transcribing than anything else. I'm not really sure what tests to run though.
+1791521348332_1_raw.wav	Okay, different pages will have different goals and objectives and things to show and particularly drill down pages should focus on the data, the insights, the aggregations rather than recommendations or the exact outcome that we suggest.
+1791521588897_2_raw.wav	I've opened up the app locally inside a brave agent.
+1791521629925_3_raw.wav	explore around looking at the other pages and grabbing the intense style themes, info from them as well to help draw your pillar conclusions to what we should move towards, what rules or objectives should be based.
+1791521708877_1_raw.wav	Make sure you relate this back to the research, these optimal standards and styles, and the direction big enterprise software is and is going for enterprise customers.
+1791522202109_2_raw.wav	The demo banner is there when we're in demo mode, so that we and users know that we're not in a client environment and they know they're not in a client environment.
+1791522263119_3_raw.wav	This is where demo numbers and fake data and the likes exist. But even in the real production environment, there are separations between aggregated log data,
+1791522336559_4_raw.wav	labels for that data and then more recommendations or potential insights or related findings from studies and research and our standardized templates for workflows.
+1791522429689_5_raw.wav	distinguish between while keeping them in their relevant spots close to the information. For example, how automatable a task is is from a research study, how automated their process is on that task, their actual logs tell us
+1791522603949_6_raw.wav	This occurs multiple times all over the place. And keeping this separation, I'm not sure how to do.
+1791523197154_7_raw.wav	Help me try and clarify the core pillars of what enterprise software and look and feel and design systems and function verse form,
+1791523252292_8_raw.wav	should look like in our app prompt leash AI. I've currently got it up in a brave agent with the debug port open so you can have a look around.
+1791523530647_9_raw.wav	one important note or example that I want to understand clearly that these pillars would guide and dictate to is how to present data to users either through their data versus industry data or research data or something versus our standards or insights or tooling or projected or something so that different levels of trust and then their ability to identify their data very, very quickly versus template data or industry data.
+1791523682725_10_raw.wav	or something so that different levels of trust and then their ability to identify their data very, very quickly versus template data or industry data.

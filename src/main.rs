@@ -12,6 +12,7 @@ mod keybind_capture;
 mod model_cache;
 mod models;
 mod notify;
+mod record_playback;
 mod text;
 mod transcriber;
 mod ui;
@@ -71,10 +72,14 @@ struct Cli {
     #[arg(long, value_name = "N", default_value_t = 1)]
     bench_iters: usize,
 
-    /// Save one raw WAV per hold and append its transcript to <DIR>/expected.txt.
+    /// Save one raw WAV per hold and append its transcript to expected.txt and transcribed.txt in <DIR>.
     /// Press Ctrl+C when done collecting samples.
     #[arg(long, value_name = "DIR")]
     record: Option<PathBuf>,
+
+    /// Disable automatic audio playback after each saved recording.
+    #[arg(long, requires = "record")]
+    no_record_playback: bool,
 
     /// Print audio input device names and exit.
     #[arg(long)]
@@ -173,7 +178,7 @@ fn run(cli: Cli) -> Result<()> {
         return run_wav(&config, path, cli.bench_iters.max(1), cli.segmented);
     }
 
-    run_daemon(config, cli.config, cli.record)
+    run_daemon(config, cli.config, cli.record, !cli.no_record_playback)
 }
 
 /// Emit a shell completion script for the derived `Cli` to stdout. Pure
@@ -447,6 +452,7 @@ struct SegmentResult {
     final_segment: bool,
     has_audio_overlap: bool,
     text: Result<Option<String>, String>,
+    recording: Option<PathBuf>,
 }
 
 struct WorkerAudioState {
@@ -503,6 +509,7 @@ fn spawn_transcription_worker(tx: mpsc::Sender<DaemonMsg>) -> SyncSender<Segment
                     final_segment,
                     has_audio_overlap,
                     text: Ok(None),
+                    recording: None,
                 }));
                 continue;
             }
@@ -511,6 +518,7 @@ fn spawn_transcription_worker(tx: mpsc::Sender<DaemonMsg>) -> SyncSender<Segment
                 audio::resampled_sample_count(segment.overlap_samples, segment.raw_rate, 16_000);
             let processed = audio_state.process(&resampled, overlap_samples);
             let peak = processed.iter().fold(0.0f32, |a, b| a.max(b.abs()));
+            let mut saved_recording = None;
             let text = if peak < 0.01 {
                 Ok(None)
             } else {
@@ -520,6 +528,11 @@ fn spawn_transcription_worker(tx: mpsc::Sender<DaemonMsg>) -> SyncSender<Segment
                     .transpose();
                 recording
                     .and_then(|filename| {
+                        if let (Some(dir), Some(filename)) =
+                            (record_dir.as_deref(), filename.as_ref())
+                        {
+                            saved_recording = Some(dir.join(filename));
+                        }
                         let text = cache
                             .transcribe_for_hold(&processed)
                             .map(|raw| post_process(&raw, &corrections))?;
@@ -537,6 +550,7 @@ fn spawn_transcription_worker(tx: mpsc::Sender<DaemonMsg>) -> SyncSender<Segment
                 final_segment,
                 has_audio_overlap,
                 text,
+                recording: saved_recording,
             }));
         }
     });
@@ -547,6 +561,7 @@ fn run_daemon(
     mut config: Config,
     config_path: Option<PathBuf>,
     record_dir: Option<PathBuf>,
+    record_playback: bool,
 ) -> Result<()> {
     let _lock = match single_instance::acquire() {
         Ok(l) => l,
@@ -658,6 +673,7 @@ fn run_daemon(
     let mut pending_reload = false;
     let segment_tx = spawn_transcription_worker(daemon_tx.clone());
     let mut next_hold_id = 1u64;
+    let mut playback = record_playback::RecordPlayback::new(record_playback);
 
     let mut poll_deadline = Instant::now();
     loop {
@@ -724,6 +740,7 @@ fn run_daemon(
         match msg {
             DaemonMsg::Hotkey(event) => match (&state, event) {
                 (State::Idle, HotkeyEvent::Press { clipboard_only }) => {
+                    playback.stop();
                     if let Err(e) = recorder.start() {
                         warn!("could not start recording: {e}");
                         ui.set_state(TrayState::Error("Couldn't start recording".into()));
@@ -851,6 +868,12 @@ fn run_daemon(
                         matches!(&state, State::Recording(h) if h.delivery_failed || h.audio_error);
                     cache.finish_hold();
                     state = State::Idle;
+                    if let Some(path) = result.recording {
+                        if let Err(error) = playback.start(&path) {
+                            warn!(%error, "recording playback failed");
+                            notify::send("Recording playback failed", &error.to_string());
+                        }
+                    }
                     if !failed {
                         ui.set_state(TrayState::Ready);
                     }
@@ -1433,14 +1456,16 @@ fn save_raw_recording(dir: &Path, hold_id: u64, raw: &[f32], raw_rate: u32) -> R
 
 fn append_expected(dir: &Path, filename: &str, transcript: &str) -> Result<()> {
     let transcript = transcript.replace(['\t', '\r', '\n'], " ");
-    let expected_path = dir.join("expected.txt");
-    let mut expected = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&expected_path)
-        .with_context(|| format!("opening {}", expected_path.display()))?;
-    writeln!(expected, "{filename}\t{transcript}")
-        .with_context(|| format!("writing {}", expected_path.display()))?;
+    for name in ["transcribed.txt", "expected.txt"] {
+        let path = dir.join(name);
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        writeln!(file, "{filename}\t{transcript}")
+            .with_context(|| format!("writing {}", path.display()))?;
+    }
     Ok(())
 }
 
@@ -1736,6 +1761,7 @@ mod tests {
                     final_segment: index == 2,
                     has_audio_overlap: false,
                     text,
+                    recording: None,
                 },
                 300,
                 &mut typer,
@@ -1816,14 +1842,39 @@ mod tests {
     }
 
     #[test]
-    fn recording_writes_one_raw_wav_and_one_expected_line() {
+    fn recording_playback_is_default_and_can_be_disabled() {
+        let cli = Cli::try_parse_from(["my-voice", "--record", "samples/my-samples"]).unwrap();
+        assert!(!cli.no_record_playback);
+        let cli = Cli::try_parse_from([
+            "my-voice",
+            "--record",
+            "samples/my-samples",
+            "--no-record-playback",
+        ])
+        .unwrap();
+        assert!(cli.no_record_playback);
+        assert!(Cli::try_parse_from(["my-voice", "--no-record-playback"]).is_err());
+    }
+
+    #[test]
+    fn recording_appends_labels_and_preserves_corrected_references() {
         let dir = std::env::temp_dir().join(format!("my-voice-recording-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
 
         let filename = save_raw_recording(&dir, 42, &[0.25, -0.25], 16_000).unwrap();
         let wav = dir.join(&filename);
         assert!(!dir.join("expected.txt").exists());
-        append_expected(&dir, &filename, "text with spaces").unwrap();
+        std::fs::write(
+            dir.join("expected.txt"),
+            "existing.wav\tcorrected reference\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("transcribed.txt"),
+            "existing.wav\toriginal output\n",
+        )
+        .unwrap();
+        append_expected(&dir, &filename, "text\twith\r\nspaces").unwrap();
 
         let wav_files: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
@@ -1838,17 +1889,20 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .ends_with("_42_raw.wav"));
-        let expected = std::fs::read_to_string(dir.join("expected.txt")).unwrap();
-        assert_eq!(
-            expected,
-            format!(
-                "{}\ttext with spaces\n",
-                wav.file_name().unwrap().to_string_lossy()
-            )
-        );
+        for (name, existing) in [
+            ("expected.txt", "corrected reference"),
+            ("transcribed.txt", "original output"),
+        ] {
+            let content = std::fs::read_to_string(dir.join(name)).unwrap();
+            assert_eq!(
+                content,
+                format!("existing.wav\t{existing}\n{filename}\ttext with  spaces\n")
+            );
+        }
 
         std::fs::remove_file(wav).unwrap();
         std::fs::remove_file(dir.join("expected.txt")).unwrap();
+        std::fs::remove_file(dir.join("transcribed.txt")).unwrap();
         std::fs::remove_dir(dir).unwrap();
     }
 
